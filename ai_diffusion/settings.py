@@ -355,6 +355,16 @@ class Settings(QObject):
     prompt_line_count_live: int
     _prompt_line_count_live = Setting("Prompt Line Count (Live)", 2)
 
+    # the Stagehand cards panel, as dragged / toggled there
+    stagehand_panel_height: int
+    _stagehand_panel_height = Setting("Stagehand Panel Height", 420)
+
+    stagehand_line_count: int
+    _stagehand_line_count = Setting("Stagehand Prompt Line Count", 4)
+
+    stagehand_hide_main_prompt: bool
+    _stagehand_hide_main_prompt = Setting("Stagehand: Hide Main Prompt", False)
+
     show_negative_prompt: bool
     _show_negative_prompt = Setting(
         _("Negative Prompt"), False, _("Show text editor to describe things to avoid")

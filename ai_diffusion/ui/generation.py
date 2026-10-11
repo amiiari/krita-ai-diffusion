@@ -758,6 +758,9 @@ class GenerationWidget(QWidget):
         layout.addWidget(self.region_prompt)
 
         self.stagehand_cards = StagehandWidget(self)
+        self.stagehand_cards.main_prompt_hidden.connect(
+            lambda hidden: self.region_prompt.setVisible(not hidden)
+        )
         layout.addWidget(self.stagehand_cards)
 
         self.strength_slider = StrengthWidget(parent=self)
