@@ -46,7 +46,7 @@ class StagehandWidget(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(2)
 
-        self._forge = QCheckBox(_("Forge (Stagehand)"), self)
+        self._forge = QCheckBox(_("Forge"), self)
         self._forge.setToolTip(
             _(
                 "Generate and inpaint through Forge with this image's settings and the cards that are on."
@@ -54,10 +54,20 @@ class StagehandWidget(QWidget):
             )
         )
         self._main = QToolButton(self)
-        self._main.setText(_("Main prompt"))
+        self._main.setText(_("Prompt"))
         self._main.setCheckable(True)
         self._main.setToolTip(_("Show or hide the main prompt box, for more room for the cards"))
         self._main.toggled.connect(self._show_main_prompt)
+        # AI Diffusion's own "Negative Prompt" setting: hidden, it is still used
+        self._negative = QToolButton(self)
+        self._negative.setText(_("Negative"))
+        self._negative.setCheckable(True)
+        self._negative.setChecked(settings.show_negative_prompt)
+        self._negative.setToolTip(
+            _("Show or hide the main negative prompt box (hidden, it is still used)")
+        )
+        self._negative.toggled.connect(self._show_negative)
+        settings.changed.connect(self._settings_changed)
         self._fold = QToolButton(self)
         self._fold.setToolTip(_("Fold every card to its header, or unfold them all"))
         self._fold.clicked.connect(self._fold_all)
@@ -66,6 +76,7 @@ class StagehandWidget(QWidget):
         head = QHBoxLayout()
         head.addWidget(self._forge, 1)
         head.addWidget(self._main)
+        head.addWidget(self._negative)
         head.addWidget(self._fold)
         outer.addLayout(head)
 
@@ -144,6 +155,15 @@ class StagehandWidget(QWidget):
         settings.save()
         self.main_prompt_hidden.emit(not shown)
 
+    def _show_negative(self, shown: bool):
+        settings.show_negative_prompt = shown
+        settings.save()
+
+    def _settings_changed(self, key: str, value):
+        if key == "show_negative_prompt":  # also when changed in AI Diffusion's settings
+            with theme.SignalBlocker(self._negative):
+                self._negative.setChecked(bool(value))
+
     def _fold_all(self):
         state = self._model.stagehand if self._model else None
         if state is None:
@@ -155,7 +175,7 @@ class StagehandWidget(QWidget):
     def _update_fold_button(self):
         state = self._model.stagehand if self._model else None
         folded = state is not None and self._collapsed >= {c.number for c in state.cards}
-        self._fold.setText(_("Unfold all") if folded else _("Fold all"))
+        self._fold.setText(_("Unfold") if folded else _("Fold"))
 
     def _drag_panel(self, y_pos: int):
         height = max(60, min(y_pos - self._scroll.y(), 2000))
