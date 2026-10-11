@@ -40,6 +40,7 @@ class RecentlyUsedSync:
 
     style: str = ""
     batch_count: int = 1
+    strength: float = 1.0
     translation_enabled: bool = True
     inpaint_mode: str = "automatic"
     inpaint_fill: str = "neutral"
@@ -61,6 +62,7 @@ class RecentlyUsedSync:
             if _find_annotation(model.document, "ui.json") is None:
                 model.style = Styles.list().find(self.style) or Styles.list().default
                 model.batch_count = self.batch_count
+                model.strength = self.strength
                 model.translation_enabled = self.translation_enabled
                 model.inpaint.mode = InpaintMode[self.inpaint_mode]
                 model.inpaint.fill = FillMode[self.inpaint_fill]
@@ -74,6 +76,7 @@ class RecentlyUsedSync:
 
         model.style_changed.connect(self._set("style"))
         model.batch_count_changed.connect(self._set("batch_count"))
+        model.strength_changed.connect(self._set("strength"))
         model.translation_enabled_changed.connect(self._set("translation_enabled"))
         model.inpaint.mode_changed.connect(self._set("inpaint_mode"))
         model.inpaint.fill_changed.connect(self._set("inpaint_fill"))
@@ -374,31 +377,16 @@ def import_prompt_from_file(model: DocumentModel):
         log.warning(f"Failed to read image metadata from {filename}: {e}")
         return
 
-    # Remember the metadata the file came with. Saving the document overwrites the file, so
-    # this is the only opportunity to capture it.
-    model.source_metadata = image_text.get("parameters", "")
-
-    if stagehand.is_stagehand(model.source_metadata):
-        # Forge Stagehand: a card per character, the prompt box keeps the main prompt
-        base, negative, cards, generation = stagehand.parse(model.source_metadata)
-        model.stagehand = stagehand.State(cards, generation)
-        if model.regions.positive == "" and model.regions.negative == "":
-            model.regions.positive, model.regions.negative = base, negative
+    model.source_metadata = ""
+    if text := image_text.get("parameters"):
+        apply_parameters(model, text)
         return
 
     if model.regions.positive != "" or model.regions.negative != "":
         return  # document already has prompts, don't overwrite them
     try:
-        # A1111
-        if text := image_text.get("parameters"):
-            if "Negative prompt:" in text:
-                positive, negative = text.split("Negative prompt:", 1)
-                model.regions.negative = negative.split("Steps:", 1)[0].strip()
-            else:  # no negative prompt, generation settings still follow the prompt
-                positive = text.split("\nSteps:", 1)[0]
-            model.regions.positive = positive.strip()
         # ComfyUI
-        elif text := image_text.get("prompt"):
+        if text := image_text.get("prompt"):
             prompt: dict[str, dict] = json.loads(text)
             for node in prompt.values():
                 if node["class_type"] in _comfy_sampler_types:
@@ -408,6 +396,31 @@ def import_prompt_from_file(model: DocumentModel):
 
     except Exception as e:
         log.warning(f"Failed to parse image metadata from {filename}: {e}")
+
+
+def apply_parameters(model: DocumentModel, text: str):
+    """An image's PNG info (A1111 / Forge "parameters") for its document: the prompts -- or
+    for a Forge Stagehand image its main prompts and a card per character. Also called for
+    .ora files by Caption Studio, which knows where their PNG info is."""
+    # Remember the metadata the file came with. Saving the document overwrites the file, so
+    # this is the only opportunity to capture it.
+    model.source_metadata = text
+
+    if stagehand.is_stagehand(text):
+        base, negative, cards, generation = stagehand.parse(text)
+        model.stagehand = stagehand.State(cards, generation)
+        if model.regions.positive == "" and model.regions.negative == "":
+            model.regions.positive, model.regions.negative = base, negative
+        return
+
+    if model.regions.positive != "" or model.regions.negative != "":
+        return  # document already has prompts, don't overwrite them
+    if "Negative prompt:" in text:
+        positive, negative = text.split("Negative prompt:", 1)
+        model.regions.negative = negative.split("Steps:", 1)[0].strip()
+    else:  # no negative prompt, generation settings still follow the prompt
+        positive = text.split("\nSteps:", 1)[0]
+    model.regions.positive = positive.strip()
 
 
 def export_prompt_to_file(model: DocumentModel, filename: str):
