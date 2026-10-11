@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 import weakref
@@ -16,7 +17,7 @@ from typing import Any, NamedTuple
 from PyQt5.QtCore import QMetaObject, QObject, Qt, QUuid, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QPainter
 
-from .. import eventloop, util
+from .. import eventloop, stagehand, util
 from ..backend import resolution, workflow
 from ..backend.api import (
     ConditioningInput,
@@ -41,12 +42,12 @@ from ..backend.client import (
     is_style_supported,
     resolve_arch,
 )
-from ..backend.network import NetworkError
+from ..backend.network import NetworkError, RequestManager
 from ..backend.resolution import compute_bounds, compute_relative_bounds
 from ..backend.resources import ControlMode
 from ..document import Document, KritaDocument, SelectionModifiers
 from ..files import FileLibrary
-from ..image import BlendMode, Bounds, DummyImage, Extent, Image, Mask
+from ..image import BlendMode, Bounds, DummyImage, Extent, Image, ImageCollection, Mask
 from ..layer import Layer, LayerType, RestoreActiveLayer
 from ..localization import translate as _
 from ..pose import Pose
@@ -145,6 +146,8 @@ class DocumentModel(QObject, ObservableProperties):
     progress_kind = Property(ProgressKind.generation)
     progress = Property(0.0)
     error = Property(no_error)
+    # cards of an image made with Forge's Stagehand: generating goes through Forge then
+    stagehand = Property(None)
 
     workspace_changed = pyqtSignal(Workspace)
     style_changed = pyqtSignal(Style)
@@ -161,6 +164,7 @@ class DocumentModel(QObject, ObservableProperties):
     progress_kind_changed = pyqtSignal(ProgressKind)
     progress_changed = pyqtSignal(float)
     error_changed = pyqtSignal(Error)
+    stagehand_changed = pyqtSignal(object)
     modified = pyqtSignal(QObject, str)
 
     def __init__(self, document: Document, connection: Connection, workflows: WorkflowCollection):
@@ -220,6 +224,9 @@ class DocumentModel(QObject, ObservableProperties):
         if not ok and msg:
             self.report_error(msg)
             return
+        if self.stagehand and self.stagehand.enabled:
+            eventloop.run(_report_errors(self, self._generate_forge()))
+            return
 
         try:
             input, job_params, cond_orig = self._prepare_workflow()
@@ -231,6 +238,57 @@ class DocumentModel(QObject, ObservableProperties):
             input, JobKind.diffusion, job_params, cond_orig, self.batch_count, queue_mode
         )
         eventloop.run(_report_errors(self, jobs))
+
+    async def _generate_forge(self):
+        """A Stagehand image: Forge's img2img with its PNG info and the cards that are on, and
+        the selection as inpaint mask (stagehand.py) -- Stagehand runs exactly as in Forge."""
+        assert self.stagehand is not None
+        extent = self._doc.extent
+        positive, negative = self.regions.positive, self.regions.negative
+        mask = self._doc.selection_mask()
+        seed = self.seed if self.fixed_seed else workflow.generate_seed()
+        image = self._get_current_image(Bounds(0, 0, *extent))
+        request = stagehand.payload(
+            self.stagehand.infotext(positive, negative),
+            image.to_base64(),
+            mask.to_base64() if mask else None,
+            self.strength,
+            seed,
+            *extent,
+        )
+        params = JobParams(Bounds(0, 0, *extent), positive, seed=seed)
+        params.metadata.update(prompt=positive, negative_prompt=negative, strength=self.strength)
+        self.clear_error()
+        if not self.jobs.any_executing():
+            self.progress = 0.0
+        job = self.jobs.add(JobKind.diffusion, params)
+        job.id = f"forge-{uuid.uuid4()}"
+        self.handle_message(ClientMessage(ClientEvent.queued, job.id))
+
+        net = RequestManager()
+        progress = asyncio.ensure_future(self._forge_progress(net, job.id))
+        try:
+            result = await net.post(f"{stagehand.FORGE_URL}/sdapi/v1/img2img", request)
+        except Exception as e:
+            self.handle_message(ClientMessage(ClientEvent.error, job.id, error=f"Forge: {e}"))
+            return
+        finally:
+            progress.cancel()
+        info = json.loads(result.get("info") or "{}")
+        if infotexts := info.get("infotexts"):
+            job.params.metadata["forge_infotext"] = infotexts[0]  # what saving writes
+        images = ImageCollection([Image.from_base64(result["images"][0])])
+        self.handle_message(ClientMessage(ClientEvent.finished, job.id, images=images))
+
+    async def _forge_progress(self, net: RequestManager, job_id: str):
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                r = await net.get(f"{stagehand.FORGE_URL}/sdapi/v1/progress?skip_current_image=true", 5)
+            except Exception:
+                continue
+            if r.get("progress"):
+                self.handle_message(ClientMessage(ClientEvent.progress, job_id, progress=r["progress"]))
 
     def _prepare_workflow(self, dryrun=False):
         arch = self.arch
@@ -640,7 +698,10 @@ class DocumentModel(QObject, ObservableProperties):
         if queued and (to_cancel := self.clear_queued()):
             self._connection.cancel(to_cancel)
         if active and self.jobs.any_executing():
-            self._connection.interrupt()
+            if any(j.id and j.id.startswith("forge-") for j in self.jobs if j.state is JobState.executing):
+                eventloop.run(_interrupt_forge())
+            else:
+                self._connection.interrupt()
 
     def clear_queued(self):
         to_remove = [job for job in self.jobs if job.state is JobState.queued]
@@ -1608,6 +1669,11 @@ def calc_selection_pre_process(
     inpaint.grow = settings.selection_grow_offset + inpaint.feather // 2
     inpaint.blend = min(settings.selection_blend, inpaint.grow + inpaint.feather // 2)
     return inpaint
+
+
+async def _interrupt_forge():
+    net = RequestManager()
+    await net.post(f"{stagehand.FORGE_URL}/sdapi/v1/interrupt", {})
 
 
 async def _report_errors(parent: DocumentModel, coro):

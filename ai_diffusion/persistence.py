@@ -12,7 +12,7 @@ from PyQt5.QtCore import QByteArray, QObject
 from PyQt5.QtGui import QImageReader
 from PyQt5.QtWidgets import QMessageBox
 
-from . import eventloop
+from . import eventloop, stagehand
 from .backend.api import FillMode, InpaintMode
 from .image import Image, ImageCollection
 from .localization import translate as _
@@ -376,6 +376,14 @@ def import_prompt_from_file(model: DocumentModel):
     # this is the only opportunity to capture it.
     model.source_metadata = image_text.get("parameters", "")
 
+    if stagehand.is_stagehand(model.source_metadata):
+        # Forge Stagehand: a card per character, the prompt box keeps the main prompt
+        base, negative, cards, generation = stagehand.parse(model.source_metadata)
+        model.stagehand = stagehand.State(cards, generation)
+        if model.regions.positive == "" and model.regions.negative == "":
+            model.regions.positive, model.regions.negative = base, negative
+        return
+
     if model.regions.positive != "" or model.regions.negative != "":
         return  # document already has prompts, don't overwrite them
     try:
@@ -411,7 +419,10 @@ def export_prompt_to_file(model: DocumentModel, filename: str):
     if not settings.save_document_metadata or not filename.lower().endswith(".png"):
         return
 
-    if job := model.jobs.last_applied():
+    if (job := model.jobs.last_applied()) and "forge_infotext" in job.params.metadata:
+        metadata = job.params.metadata["forge_infotext"]  # Forge's own, Stagehand's lines and all
+        source = "last applied Forge generation"
+    elif job:
         metadata = create_img_metadata(job.params)
         source = "last applied generation"
     else:

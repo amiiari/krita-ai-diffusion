@@ -57,6 +57,7 @@ from ..style import Styles
 from ..util import ensure, flatten, sequence_equal
 from . import theme
 from .region import RegionPromptWidget
+from .stagehand import StagehandWidget
 from .widget import (
     ErrorBox,
     GenerateButton,
@@ -756,6 +757,9 @@ class GenerationWidget(QWidget):
         self.region_prompt = RegionPromptWidget(self)
         layout.addWidget(self.region_prompt)
 
+        self.stagehand_cards = StagehandWidget(self)
+        layout.addWidget(self.stagehand_cards)
+
         self.strength_slider = StrengthWidget(parent=self)
         self.layer_count_widget = LayerCountWidget(self)
         self.layer_count_widget.setVisible(False)
@@ -853,6 +857,7 @@ class GenerationWidget(QWidget):
             ]
             self.region_prompt.regions = model.active_regions
             self.custom_inpaint.model = model
+            self.stagehand_cards.model = model
             self.generate_button.model = model
             self.queue_button.model = model
             self.progress_bar.model = model

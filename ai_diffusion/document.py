@@ -279,6 +279,22 @@ class KritaDocument(Document):
     def selection_bounds(self):
         return self._selection_bounds
 
+    def selection_mask(self) -> Image | None:
+        """The selection over the whole image (grayscale), or None when nothing or everything
+        is selected -- what Forge's inpaint takes as its mask."""
+        selection = self._doc.selection()
+        if not selection or _selection_is_entire_document(selection, self.extent):
+            return None
+        return Image.from_packed_bytes(selection.pixelData(0, 0, *self.extent), self.extent, 1)
+
+    def select_rects(self, rects: list[tuple[int, int, int, int]]):
+        """Replace the selection with these rectangles (x, y, width, height)."""
+        selection = krita.Selection()
+        selection.resize(*self.extent)
+        for rect in rects:
+            selection.select(*rect, 255)
+        self._doc.setSelection(selection)
+
     @property
     def resolution(self):
         return self._doc.resolution() / 72.0  # KisImage::xRes which is applied to vectors
