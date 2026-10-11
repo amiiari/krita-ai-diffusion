@@ -6,6 +6,8 @@ from krita import DockWidgetFactory, DockWidgetFactoryBase, Extension, Krita, Wi
 from PyQt5.QtWidgets import QAction
 
 from . import __version__, eventloop
+from .captions.bridge import bridge as caption_bridge
+from .captions.docker import CaptionsDocker
 from .model.model import Workspace
 from .model.root import root
 from .persistence import export_prompt_to_file
@@ -51,6 +53,7 @@ class AIToolsExtension(Extension):
         notifier.setActive(True)
         notifier.applicationClosing.connect(self.shutdown)  # type: ignore
         notifier.imageSaved.connect(self.image_saved)  # type: ignore
+        caption_bridge()  # Save All for the Content Manager, whether the docker is open or not
 
     def setup(self):
         eventloop.run(root.autostart(self._settings_dialog.connection.update_ui))
@@ -101,4 +104,8 @@ class AIToolsExtension(Extension):
 Krita.instance().addExtension(AIToolsExtension(Krita.instance()))
 Krita.instance().addDockWidgetFactory(
     DockWidgetFactory("imageDiffusion", DockWidgetFactoryBase.DockRight, ImageDiffusionWidget)  # type: ignore
+)
+# the id Caption Studio had as its own plugin: Krita keeps it where it was docked
+Krita.instance().addDockWidgetFactory(
+    DockWidgetFactory("caption_studio", DockWidgetFactoryBase.DockRight, CaptionsDocker)  # type: ignore
 )

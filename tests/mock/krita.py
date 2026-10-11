@@ -133,6 +133,10 @@ class DockWidget(QDockWidget):
 # ---------------------------------------------------------------------------
 
 
+class InfoObject:
+    """Stub of Krita's InfoObject (export options)."""
+
+
 class DockWidgetFactoryBase:
     DockLeft = 0
     DockRight = 1
@@ -533,6 +537,29 @@ class Document(QObject):
 
     def fileName(self) -> str:
         return self._filename
+
+    # --- saving (Caption Studio's Save All / export) ---
+
+    def modified(self) -> bool:
+        return getattr(self, "_modified", False)
+
+    def setModified(self, value: bool) -> None:
+        self._modified = value
+
+    def save(self) -> bool:
+        self.saved = getattr(self, "saved", 0) + 1
+        self._modified = False
+        return True
+
+    def exportImage(self, filename: str, info: InfoObject) -> bool:
+        self.exported = filename
+        return True
+
+    def setBatchmode(self, value: bool) -> None:
+        pass
+
+    def waitForDone(self) -> None:
+        pass
 
     # --- layer tree ---
 

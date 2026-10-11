@@ -501,8 +501,12 @@ class Image:
         line structure of prompts written by other tools. Parsing the chunks directly keeps
         the text byte-for-byte as it was written.
         """
+        return Image.png_text(Path(img_path).read_bytes())
+
+    @staticmethod
+    def png_text(data: bytes) -> dict[str, str]:
+        """read_png_text for PNG bytes (eg. an image inside an .ora)."""
         result: dict[str, str] = {}
-        data = Path(img_path).read_bytes()
         if data[:8] != b"\x89PNG\r\n\x1a\n":
             return result
 

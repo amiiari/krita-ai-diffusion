@@ -744,6 +744,7 @@ class GenerationWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 2, 2, 0)
+        layout.setSpacing(2)  # compact: room for the prompts and the history
         self.setLayout(layout)
 
         self.workspace_select = WorkspaceSelectWidget(self)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import zipfile
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -366,9 +367,36 @@ def _read_image_text(filename: str) -> dict[str, str]:
     return {key: reader.text(key) for key in reader.textKeys()}
 
 
+def _ora_parameters(ora_path: str):
+    """The PNG info of an edit-stage .ora (the Content Manager's): fresh ones carry the
+    original -hires PNG as data/base.png. Once Krita saves the file it re-encodes the layers
+    and drops their metadata, so then the source image next to the set is read
+    (<set>/Krita Documents/<stem>.ora -> <set>/<stem>-hires.png)."""
+    try:
+        with zipfile.ZipFile(ora_path) as zf:
+            if "data/base.png" in zf.namelist():
+                if text := Image.png_text(zf.read("data/base.png")).get("parameters"):
+                    return text
+    except (OSError, zipfile.BadZipFile) as e:
+        log.warning(f"Failed to read {ora_path}: {e}")
+    folder = Path(ora_path).parent
+    if folder.name.lower() == "krita documents":  # legacy location
+        folder = folder.parent
+    for suffix in ("-hires", "-hires-adetailer", ""):
+        source = folder / (Path(ora_path).stem + suffix + ".png")
+        if source.exists():
+            if text := Image.read_png_text(source).get("parameters"):
+                return text
+    return ""
+
+
 def import_prompt_from_file(model: DocumentModel):
     exts = (".png", ".jpg", ".jpeg", ".webp")
     filename = model.document.filename
+    if filename.lower().endswith(".ora"):
+        if text := _ora_parameters(filename):
+            apply_parameters(model, text)
+        return
     if not filename.endswith(exts):
         return
     try:
