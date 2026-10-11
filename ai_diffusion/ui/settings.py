@@ -750,6 +750,7 @@ class InterfaceSettings(SettingsTab):
         self.add("new_seed_after_apply", SwitchSetting(S._new_seed_after_apply, parent=self))
         self.add("save_image_format", ComboBoxSetting(S._save_image_format, parent=self))
         self.add("save_image_metadata", SwitchSetting(S._save_image_metadata, parent=self))
+        self.add("save_document_metadata", SwitchSetting(S._save_document_metadata, parent=self))
         self.add("debug_dump_workflow", SwitchSetting(S._debug_dump_workflow, parent=self))
 
         self._widgets["save_image_format"].value_changed.connect(self._update_image_format_widgets)
