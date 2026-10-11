@@ -762,6 +762,7 @@ class GenerationWidget(QWidget):
             lambda hidden: self.region_prompt.setVisible(not hidden)
         )
         layout.addWidget(self.stagehand_cards)
+        layout.insertWidget(0, self.stagehand_cards.header)  # its show / hide bar: on top
 
         self.strength_slider = StrengthWidget(parent=self)
         self.layer_count_widget = LayerCountWidget(self)

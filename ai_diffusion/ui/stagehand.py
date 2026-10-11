@@ -73,12 +73,16 @@ class StagehandWidget(QWidget):
         self._fold.clicked.connect(self._fold_all)
         self._forge.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._forge.setMinimumWidth(48)
-        head = QHBoxLayout()
+        # the bar goes at the very top of the docker (GenerationWidget puts it there): it
+        # shows / hides what's below it
+        self.header = QWidget(parent)
+        head = QHBoxLayout(self.header)
+        head.setContentsMargins(0, 0, 0, 0)
         head.addWidget(self._forge, 1)
         head.addWidget(self._main)
         head.addWidget(self._negative)
         head.addWidget(self._fold)
-        outer.addLayout(head)
+        self.header.setVisible(False)
 
         self._scroll = QScrollArea(self)
         self._scroll.setWidgetResizable(True)
@@ -129,6 +133,7 @@ class StagehandWidget(QWidget):
         self._folds = {}
         state = self._model.stagehand if self._model else None
         self.setVisible(state is not None)
+        self.header.setVisible(state is not None)
         self.main_prompt_hidden.emit(state is not None and settings.stagehand_hide_main_prompt)
         if state is None:
             return
