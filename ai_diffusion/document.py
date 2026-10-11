@@ -288,11 +288,17 @@ class KritaDocument(Document):
         return Image.from_packed_bytes(selection.pixelData(0, 0, *self.extent), self.extent, 1)
 
     def select_rects(self, rects: list[tuple[int, int, int, int]]):
-        """Replace the selection with these rectangles (x, y, width, height)."""
+        """Replace the selection with these rectangles (x, y, width, height). Written as a
+        whole-image mask: Selection.resize() selects everything it covers, so building the
+        selection from resize() + select() selected the whole image."""
+        width, height = self.extent
+        mask = bytearray(width * height)
+        for x, y, w, h in rects:
+            x0, x1 = max(x, 0), min(x + w, width)
+            for row in range(max(y, 0), min(y + h, height)):
+                mask[row * width + x0 : row * width + x1] = b"\xff" * max(x1 - x0, 0)
         selection = krita.Selection()
-        selection.resize(*self.extent)
-        for rect in rects:
-            selection.select(*rect, 255)
+        selection.setPixelData(QByteArray(bytes(mask)), 0, 0, width, height)
         self._doc.setSelection(selection)
 
     @property

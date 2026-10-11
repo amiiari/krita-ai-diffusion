@@ -328,7 +328,7 @@ class StagehandWidget(QWidget):
             assert self._model is not None
             doc = self._model.document
             bounds = doc.selection_bounds
-            if not bounds:
+            if not bounds or doc.selection_mask() is None:  # nothing, or everything, selected
                 QMessageBox.information(
                     self,
                     _("Set her box"),
