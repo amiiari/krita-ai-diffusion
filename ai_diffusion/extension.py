@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import QAction
 from . import __version__, eventloop
 from .model.model import Workspace
 from .model.root import root
+from .persistence import export_prompt_to_file
 from .settings import settings
 from .ui import actions
 from .ui.diffusion import ImageDiffusionWidget
@@ -49,6 +50,7 @@ class AIToolsExtension(Extension):
         notifier = Krita.instance().notifier()
         notifier.setActive(True)
         notifier.applicationClosing.connect(self.shutdown)  # type: ignore
+        notifier.imageSaved.connect(self.image_saved)  # type: ignore
 
     def setup(self):
         eventloop.run(root.autostart(self._settings_dialog.connection.update_ui))
@@ -56,6 +58,16 @@ class AIToolsExtension(Extension):
     def shutdown(self):
         root.server.terminate()
         eventloop.stop()
+
+    def image_saved(self, filename: str):
+        try:
+            # Saving a copy (eg. "Save As" a png from a .kra) reports a filename which does
+            # not belong to any open document, so fall back to the document being edited.
+            model = root.model_for_filename(filename) or root.model_for_active_document()
+            if model is not None:
+                export_prompt_to_file(model, filename)
+        except Exception as e:
+            log.warning(f"Failed to embed metadata into {filename}: {e}")
 
     def _create_action(self, window: Window, name: str, func: Callable[[], None]):
         action = window.createAction(f"ai_diffusion_{name}", "", "")

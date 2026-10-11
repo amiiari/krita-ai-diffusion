@@ -182,6 +182,19 @@ class JobQueue(QObject):
     def find(self, id: str):
         return next((j for j in self._entries if j.id == id), None)
 
+    def last_applied(self) -> Job | None:
+        """Most recent generation whose result was applied to the canvas. This is the job
+        that produced what the user currently sees, so it describes the saved image."""
+        return next(
+            (
+                job
+                for job in reversed(self._entries)
+                if job.kind in (JobKind.diffusion, JobKind.animation)
+                and any(job.in_use.values())
+            ),
+            None,
+        )
+
     def count(self, state: JobState):
         return sum(1 for j in self._entries if j.state is state)
 

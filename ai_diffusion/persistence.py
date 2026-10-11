@@ -4,6 +4,7 @@ import asyncio
 import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from pathlib import Path
 from time import time
 from typing import Any
 
@@ -13,7 +14,7 @@ from PyQt5.QtWidgets import QMessageBox
 
 from . import eventloop
 from .backend.api import FillMode, InpaintMode
-from .image import ImageCollection
+from .image import Image, ImageCollection
 from .localization import translate as _
 from .model.control import ControlLayer, ControlLayerList
 from .model.custom_workflow import CustomWorkspace
@@ -23,6 +24,7 @@ from .model.properties import deserialize, serialize
 from .model.region import Region, RootRegion
 from .settings import settings
 from .style import Style, Styles
+from .text import create_img_metadata
 from .util import client_logger as log
 from .util import encode_json
 
@@ -345,29 +347,85 @@ def _find_annotation(document, name: str):
     return None
 
 
+def _read_image_text(filename: str) -> dict[str, str]:
+    """Text chunks of an image, keyed by keyword ('parameters', 'prompt', ...).
+
+    PNGs are parsed directly: QImageReader collapses newlines in text chunks, which would
+    flatten a multi-line prompt into a single paragraph. Other formats fall back to Qt.
+    """
+    if filename.lower().endswith(".png"):
+        text = Image.read_png_text(filename)
+        if text:
+            return text
+    reader = QImageReader(filename)
+    return {key: reader.text(key) for key in reader.textKeys()}
+
+
 def import_prompt_from_file(model: DocumentModel):
     exts = (".png", ".jpg", ".jpeg", ".webp")
     filename = model.document.filename
-    if model.regions.positive == "" and model.regions.negative == "" and filename.endswith(exts):
-        try:
-            reader = QImageReader(filename)
-            # A1111
-            if text := reader.text("parameters"):
-                if "Negative prompt:" in text:
-                    positive, negative = text.split("Negative prompt:", 1)
-                    model.regions.positive = positive.strip()
-                    model.regions.negative = negative.split("Steps:", 1)[0].strip()
-            # ComfyUI
-            elif text := reader.text("prompt"):
-                prompt: dict[str, dict] = json.loads(text)
-                for node in prompt.values():
-                    if node["class_type"] in _comfy_sampler_types:
-                        inputs = node["inputs"]
-                        model.regions.positive = _find_text_prompt(prompt, inputs["positive"][0])
-                        model.regions.negative = _find_text_prompt(prompt, inputs["negative"][0])
+    if not filename.endswith(exts):
+        return
+    try:
+        image_text = _read_image_text(filename)
+    except Exception as e:
+        log.warning(f"Failed to read image metadata from {filename}: {e}")
+        return
 
-        except Exception as e:
-            log.warning(f"Failed to read PNG metadata from {filename}: {e}")
+    # Remember the metadata the file came with. Saving the document overwrites the file, so
+    # this is the only opportunity to capture it.
+    model.source_metadata = image_text.get("parameters", "")
+
+    if model.regions.positive != "" or model.regions.negative != "":
+        return  # document already has prompts, don't overwrite them
+    try:
+        # A1111
+        if text := image_text.get("parameters"):
+            if "Negative prompt:" in text:
+                positive, negative = text.split("Negative prompt:", 1)
+                model.regions.negative = negative.split("Steps:", 1)[0].strip()
+            else:  # no negative prompt, generation settings still follow the prompt
+                positive = text.split("\nSteps:", 1)[0]
+            model.regions.positive = positive.strip()
+        # ComfyUI
+        elif text := image_text.get("prompt"):
+            prompt: dict[str, dict] = json.loads(text)
+            for node in prompt.values():
+                if node["class_type"] in _comfy_sampler_types:
+                    inputs = node["inputs"]
+                    model.regions.positive = _find_text_prompt(prompt, inputs["positive"][0])
+                    model.regions.negative = _find_text_prompt(prompt, inputs["negative"][0])
+
+    except Exception as e:
+        log.warning(f"Failed to parse image metadata from {filename}: {e}")
+
+
+def export_prompt_to_file(model: DocumentModel, filename: str):
+    """Embed generation parameters into a PNG the user just saved from Krita (eg. Ctrl+S).
+
+    Krita writes the file itself and does not know about diffusion metadata, so the chunk is
+    added afterwards. Parameters come from the last generation applied to the canvas, which is
+    what the saved pixels depict. Failing that (eg. an image opened from another tool and only
+    edited here) the metadata the document was opened with is preserved instead, since Krita
+    would otherwise drop it."""
+    if not settings.save_document_metadata or not filename.lower().endswith(".png"):
+        return
+
+    if job := model.jobs.last_applied():
+        metadata = create_img_metadata(job.params)
+        source = "last applied generation"
+    else:
+        metadata = model.source_metadata
+        source = "original file"
+    if not metadata:
+        return
+
+    try:
+        png_data = Path(filename).read_bytes()
+        Image.save_png_w_itxt(filename, png_data, "parameters", metadata)
+        log.info(f"Embedded metadata ({source}) into {filename}")
+    except Exception as e:
+        log.warning(f"Failed to write PNG metadata to {filename}: {e}")
 
 
 _comfy_sampler_types = ["KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced"]

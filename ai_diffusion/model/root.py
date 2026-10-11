@@ -79,6 +79,10 @@ class Root(QObject):
             return model
         return None
 
+    def model_for_filename(self, filename: str) -> DocumentModel | None:
+        self.prune_models()
+        return next((m.model for m in self._models if m.model.document.filename == filename), None)
+
     @property
     def models(self) -> list[DocumentModel]:
         return [m.model for m in self._models]

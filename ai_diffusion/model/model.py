@@ -168,6 +168,9 @@ class DocumentModel(QObject, ObservableProperties):
         self._doc = document
         self._connection = connection
         self._layer: Layer | None = None
+        # Metadata the document's file had when it was opened. Saving overwrites the file, so
+        # it has to be captured up front to be able to preserve it.
+        self.source_metadata: str = ""
         self.generate_seed()
         self.jobs = JobQueue()
         self.regions = RootRegion(self)

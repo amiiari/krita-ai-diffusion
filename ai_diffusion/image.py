@@ -455,6 +455,7 @@ class Image:
 
         offset = 8
         ihdr_inserted = False
+        keyword_bytes = keyword.encode("latin1")
 
         with open(img_path, "wb") as f:
             # Write PNG header
@@ -467,6 +468,12 @@ class Image:
                 crc = png_data[offset + 8 + length : offset + 12 + length]
                 offset += 12 + length
 
+                # Drop an existing text chunk with the same keyword: readers keep the last
+                # match, so a stale copy further down the file would shadow the one below.
+                if chunk_type in (b"tEXt", b"zTXt", b"iTXt"):
+                    if chunk_data.split(b"\x00", 1)[0] == keyword_bytes:
+                        continue
+
                 # Write original chunk
                 f.write(struct.pack(">I", length))
                 f.write(chunk_type)
@@ -475,7 +482,6 @@ class Image:
 
                 if not ihdr_inserted and chunk_type == b"IHDR":
                     # Insert iTXt chunk after IHDR
-                    keyword_bytes = keyword.encode("latin1")
                     text_bytes = text.encode("utf-8")
                     itxt_data = (
                         keyword_bytes
@@ -491,6 +497,51 @@ class Image:
                     f.write(itxt_data)
                     f.write(struct.pack(">I", zlib.crc32(b"iTXt" + itxt_data) & 0xFFFFFFFF))
                     ihdr_inserted = True
+
+    @staticmethod
+    def read_png_text(img_path: str | Path) -> dict[str, str]:
+        """Read tEXt/zTXt/iTXt chunks from a PNG file.
+
+        Qt's QImageReader.text() collapses newlines in PNG text chunks, which destroys the
+        line structure of prompts written by other tools. Parsing the chunks directly keeps
+        the text byte-for-byte as it was written.
+        """
+        result: dict[str, str] = {}
+        data = Path(img_path).read_bytes()
+        if data[:8] != b"\x89PNG\r\n\x1a\n":
+            return result
+
+        offset = 8
+        while offset + 8 <= len(data):
+            length = struct.unpack(">I", data[offset : offset + 4])[0]
+            chunk_type = data[offset + 4 : offset + 8]
+            chunk_data = data[offset + 8 : offset + 8 + length]
+            offset += 12 + length  # length + type + data + crc
+
+            if chunk_type == b"IEND":
+                break
+            if chunk_type not in (b"tEXt", b"zTXt", b"iTXt"):
+                continue
+
+            try:
+                keyword, rest = chunk_data.split(b"\x00", 1)
+                if chunk_type == b"tEXt":
+                    text = rest.decode("utf-8", errors="replace")
+                elif chunk_type == b"zTXt":
+                    # rest = compression method (1 byte) + compressed text
+                    text = zlib.decompress(rest[1:]).decode("utf-8", errors="replace")
+                else:  # iTXt
+                    # rest = flag + method + language\0 + translated keyword\0 + text
+                    compressed = rest[0] == 1
+                    _, _, tail = rest[2:].split(b"\x00", 2)
+                    if compressed:
+                        tail = zlib.decompress(tail)
+                    text = tail.decode("utf-8", errors="replace")
+                result[keyword.decode("latin1")] = text
+            except Exception:
+                continue  # skip malformed chunk, keep reading the rest
+
+        return result
 
     @classmethod
     def mask_subtract(cls, lhs: Image, rhs: Image):

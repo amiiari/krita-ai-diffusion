@@ -277,6 +277,16 @@ class Settings(QObject):
         _("When saving generated images from thumbnails, include metadata in the PNG"),
     )
 
+    save_document_metadata: bool
+    _save_document_metadata = Setting(
+        _("Save Metadata to Document"),
+        False,
+        _(
+            "When saving or exporting the document as PNG (eg. with Ctrl+S), embed the parameters"
+            " of the last generation that was applied to the canvas"
+        ),
+    )
+
     save_image_format: ImageFileFormat
     _save_image_format = Setting(
         _("Save Image Format"),
