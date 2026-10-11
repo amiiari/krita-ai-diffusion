@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QFrame,
     QHBoxLayout,
+    QMessageBox,
     QScrollArea,
     QSizePolicy,
     QToolButton,
@@ -51,8 +52,9 @@ class StagehandWidget(QWidget):
         self._forge = QCheckBox(_("Forge"), self)
         self._forge.setToolTip(
             _(
-                "Generate and inpaint through Forge with this image's settings and the cards that are on."
-                " The selection is the inpaint mask, Strength is the denoise. Off: ComfyUI as usual."
+                "On: generate and inpaint through Forge with this image's own settings and the cards"
+                " that are on. Off (the default): Krita's own inpainting (ComfyUI), with the cards of"
+                " the characters under the selection added to the prompt."
             )
         )
         self._main = QToolButton(self)
@@ -76,6 +78,10 @@ class StagehandWidget(QWidget):
         self._fold = QToolButton(self)
         self._fold.setToolTip(_("Fold every card to its header, or unfold them all"))
         self._fold.clicked.connect(self._fold_all)
+        self._show_all = QToolButton(self)
+        self._show_all.setText(_("All"))
+        self._show_all.setToolTip(_("Select every character's area (the cards that are on)"))
+        self._show_all.clicked.connect(self._select_all)
         self._forge.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._forge.setMinimumWidth(48)
         # the bar goes at the very top of the docker (GenerationWidget puts it there): it
@@ -87,6 +93,7 @@ class StagehandWidget(QWidget):
         head.addWidget(self._main)
         head.addWidget(self._negative)
         head.addWidget(self._fold)
+        head.addWidget(self._show_all)
         self.header.setVisible(False)
 
         self._scroll = QScrollArea(self)
@@ -178,6 +185,20 @@ class StagehandWidget(QWidget):
             # the characters' Undesired Content with it (those that have any)
             for button, card in self._uc_buttons:
                 button.setChecked(bool(value) and bool(card.uc.strip()))
+
+    def _select_all(self):
+        state = self._model.stagehand if self._model else None
+        if state is None:
+            return
+        doc = self._model.document
+        rects = [
+            r
+            for c in state.cards
+            if c.enabled
+            for r in stagehand.card_area(state.cards, c, *doc.extent)
+        ]
+        if rects:
+            doc.select_rects(rects)
 
     def _fold_all(self):
         state = self._model.stagehand if self._model else None
@@ -306,9 +327,23 @@ class StagehandWidget(QWidget):
         def set_box():
             assert self._model is not None
             doc = self._model.document
-            if bounds := doc.selection_bounds:
-                card.places = [stagehand.rect_place(tuple(bounds), *doc.extent, grid=state.grid)]
-                self._edit(state)
+            bounds = doc.selection_bounds
+            if not bounds:
+                QMessageBox.information(
+                    self,
+                    _("Set her box"),
+                    _(
+                        "Select an area first (any selection tool), then click Box: its bounds become"
+                    )
+                    + f" {card.title}"
+                    + _("'s box."),
+                )
+                return
+            card.places = [stagehand.rect_place(tuple(bounds), *doc.extent, grid=state.grid)]
+            self._edit(state)
+            select_area()  # show her new box
+            place.setText("✓")  # and that it took
+            QTimer.singleShot(1200, lambda: place.setText(_("Box")))
 
         def edit(field: str, text: str):
             setattr(card, field, text)

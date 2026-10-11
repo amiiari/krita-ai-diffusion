@@ -460,6 +460,17 @@ class Selection(QObject):
         self._width = w
         self._height = h
 
+    def resize(self, w: int, h: int) -> None:
+        self._x, self._y, self._width, self._height = 0, 0, w, h
+        self._data = QByteArray(bytes(w * h))
+
+    def select(self, x: int, y: int, w: int, h: int, value: int) -> None:
+        data = bytearray(bytes(self._data))
+        x0, x1 = max(x - self._x, 0), min(x - self._x + w, self._width)
+        for row in range(max(y - self._y, 0), min(y - self._y + h, self._height)):
+            data[row * self._width + x0 : row * self._width + x1] = bytes([value]) * max(x1 - x0, 0)
+        self._data = QByteArray(bytes(data))
+
     def duplicate(self) -> Selection:
         copy = Selection()
         copy._x = self._x

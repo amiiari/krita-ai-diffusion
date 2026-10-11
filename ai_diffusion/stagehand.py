@@ -371,11 +371,13 @@ class State(QObject):
 
     changed = pyqtSignal()
 
-    def __init__(self, cards: list[Card], settings: str, enabled=True):
+    def __init__(self, cards: list[Card], settings: str, enabled=False):
         super().__init__()
         self.cards = cards
         self.settings = settings
-        self.enabled = enabled  # off: generate with ComfyUI as usual
+        # on: generate through Forge. Off (the default): Krita's own ComfyUI inpainting, with
+        # the cards of the characters under the selection added to the prompt
+        self.enabled = enabled
 
     @property
     def grid(self):
@@ -386,13 +388,13 @@ class State(QObject):
 
     def to_json(self):
         cards = [asdict(c) for c in self.cards]
-        return json.dumps({"cards": cards, "settings": self.settings, "enabled": self.enabled})
+        return json.dumps({"cards": cards, "settings": self.settings, "forge": self.enabled})
 
     @staticmethod
     def from_json(text: str):
         data = json.loads(text)
         cards = [Card(**c) for c in data["cards"]]
-        return State(cards, data["settings"], data.get("enabled", True))
+        return State(cards, data["settings"], data.get("forge", False))
 
 
 if __name__ == "__main__":
@@ -513,4 +515,10 @@ if __name__ == "__main__":
     two.enabled = False
     back = State.from_json(State(cards, settings, enabled=False).to_json())
     assert back.cards == cards and back.settings == settings and back.enabled is False
+    # ComfyUI by default; Forge when switched on, kept by a .kra -- but not from documents
+    # saved while Forge was the default (their "enabled")
+    assert State(cards, settings).enabled is False
+    assert State.from_json(State(cards, settings, enabled=True).to_json()).enabled is True
+    old = json.dumps({"cards": [], "settings": "", "enabled": True})
+    assert State.from_json(old).enabled is False
     print("ok")
