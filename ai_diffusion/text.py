@@ -44,7 +44,9 @@ class LoraId(NamedTuple):
         return LoraId(original, original.replace("\\", "/").removesuffix(".safetensors"))
 
 
-pattern_comment = re.compile(r"(?<!\\)#(?![0-9a-fA-F]{6}).*")
+# "#" starts a comment, except escaped (\#), a hex color (#ff5733), or in one of Stagehand's
+# interaction tags (source#hug, target#hug, mutual#hug -- NovelAI's syntax), which are prompt
+pattern_comment = re.compile(r"(?<!\\)(?<!\bsource)(?<!\btarget)(?<!\bmutual)#(?![0-9a-fA-F]{6}).*")
 pattern_lora = re.compile(r"<lora:([^:<>]+)(?::(-?[^:<>]*))?>", re.IGNORECASE)
 pattern_layer = re.compile(r"<layer:([^>]+)>", re.IGNORECASE)
 pattern_weight_expr = re.compile(r"\([^:()]+:(-?[\d.]+)\)")

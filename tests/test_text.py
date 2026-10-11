@@ -86,6 +86,15 @@ def test_strip_prompt_comments_multiline():
     assert strip_prompt_comments(prompt) == expected
 
 
+def test_strip_prompt_comments_interaction_tags():
+    # Stagehand's (NovelAI's) interaction tags aren't comments; a real comment after them is
+    assert strip_prompt_comments("girl, source#hands on shoulder, target#hug") == (
+        "girl, source#hands on shoulder, target#hug"
+    )
+    assert strip_prompt_comments("mutual#kiss, smile # later") == "mutual#kiss, smile"
+    assert strip_prompt_comments("opensource#x") == "opensource"  # only the whole word
+
+
 def test_strip_prompt_comments_hex_color():
     assert (
         strip_prompt_comments("A color code #FF5733 should not be stripped")
