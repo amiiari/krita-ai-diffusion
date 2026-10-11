@@ -287,6 +287,33 @@ class Settings(QObject):
         ),
     )
 
+    forge_url: str
+    _forge_url = Setting(
+        _("Forge Server (Stagehand)"),
+        "http://127.0.0.1:7860",
+        _("Images made with Forge's Stagehand are edited and inpainted through this Forge"),
+    )
+
+    forge_only_masked: bool
+    _forge_only_masked = Setting(
+        _("Forge Inpaint: Only Masked"),
+        True,
+        _(
+            "Inpaint just the area around the selection at full resolution (Forge's 'Only masked');"
+            " off: the whole picture"
+        ),
+    )
+
+    forge_inpaint_padding: int
+    _forge_inpaint_padding = Setting(
+        _("Forge Inpaint: Masked Area Padding"), 32, _("Pixels of context around the selection")
+    )
+
+    forge_mask_blur: int
+    _forge_mask_blur = Setting(
+        _("Forge Inpaint: Mask Blur"), 4, _("How softly the inpainted area blends in, in pixels")
+    )
+
     save_image_format: ImageFileFormat
     _save_image_format = Setting(
         _("Save Image Format"),

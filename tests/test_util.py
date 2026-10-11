@@ -1,7 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ai_diffusion.util import batched, find_unused_path, sanitize_prompt
+from ai_diffusion.util import batched, find_unused_path, sanitize_prompt, unique_latest
 
 
 def test_batched():
@@ -25,3 +25,9 @@ def test_unused_path():
         assert find_unused_path(file) == Path(dir) / "test-1.txt"
         (Path(dir) / "test-1.txt").touch()
         assert find_unused_path(file) == Path(dir) / "test-2.txt"
+
+
+def test_unique_latest():
+    # first-seen order, the last item per key wins (a typed LoRA weight over the style's)
+    items = [("a", 1), ("b", 1), ("a", 2)]
+    assert unique_latest(items, key=lambda x: x[0]) == [("a", 2), ("b", 1)]

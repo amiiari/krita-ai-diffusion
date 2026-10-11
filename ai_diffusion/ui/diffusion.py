@@ -322,7 +322,11 @@ class ImageDiffusionWidget(DockWidget):
         requires_update = self._welcome.requires_update
         has_news = self._welcome.has_news
         is_cloud = settings.server_mode is ServerMode.cloud
-        if model is None or not is_connected or requires_update or has_news:
+        # a Stagehand image generates through Forge, so it doesn't need ComfyUI connected
+        forge_only = (
+            model is not None and model.stagehand and model.workspace is Workspace.generation
+        )
+        if model is None or not (is_connected or forge_only) or requires_update or has_news:
             self._frame.setCurrentWidget(self._welcome)
         elif model.workspace is Workspace.generation:
             self._generation.model = model

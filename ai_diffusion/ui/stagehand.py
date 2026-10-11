@@ -1,5 +1,5 @@
 """The cards of an image made with Forge's Stagehand (see ..stagehand): on/off, prompt,
-Undesired Content, and its box -- shown as a selection, so it's never part of the image."""
+Undesired Content, and its area -- shown as a selection, so it's never part of the image."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QPlainTextEdit,
+    QScrollArea,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -24,9 +25,19 @@ class StagehandWidget(QWidget):
         super().__init__(parent)
         self._model: DocumentModel | None = None
         self._connection: QMetaObject.Connection | None = None
-        self._layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        # many characters scroll instead of pushing the history out of the docker
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMaximumHeight(360)
+        content = QWidget(scroll)
+        self._layout = QVBoxLayout(content)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(2)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
         self.setVisible(False)
 
     @property
@@ -51,14 +62,21 @@ class StagehandWidget(QWidget):
             return
         forge = QCheckBox(_("Generate with Forge (Stagehand)"), self)
         forge.setToolTip(
-            _("Generate and inpaint through Forge with this image's settings and the cards that are on."
-              " The selection is the inpaint mask, Strength is the denoise. Off: ComfyUI as usual.")
+            _(
+                "Generate and inpaint through Forge with this image's settings and the cards that are on."
+                " The selection is the inpaint mask, Strength is the denoise. Off: ComfyUI as usual."
+            )
         )
         forge.setChecked(state.enabled)
-        forge.toggled.connect(lambda on: setattr(state, "enabled", on))
+        forge.toggled.connect(lambda on: self._edit(state, setattr(state, "enabled", on)))
         self._layout.addWidget(forge)
         for card in state.cards:
             self._layout.addWidget(self._card(state, card))
+        self._layout.addStretch()
+
+    @staticmethod
+    def _edit(state: stagehand.State, _change=None):
+        state.changed.emit()  # saved with the document
 
     def _card(self, state: stagehand.State, card: stagehand.Card):
         frame = QFrame(self)
@@ -69,10 +87,12 @@ class StagehandWidget(QWidget):
 
         on = QCheckBox(card.title, frame)
         on.setChecked(card.enabled)
-        on.setToolTip(_("Off: she's left out of the generation, as switching her card off in Forge"))
+        on.setToolTip(
+            _("Off: she's left out of the generation, as switching her card off in Forge")
+        )
         select = QToolButton(frame)
         select.setText(_("Select"))
-        select.setToolTip(_("Select her box (where her prompt applies) -- inpaint it with Generate"))
+        select.setToolTip(_("Select where her prompt applies -- inpaint it with Generate"))
         place = QToolButton(frame)
         place.setText(_("Set box"))
         place.setToolTip(_("Make the current selection's bounds her box"))
@@ -101,22 +121,27 @@ class StagehandWidget(QWidget):
             card.enabled = value
             prompt.setEnabled(value)
 
-        def select_box():
+        def select_area():
             assert self._model is not None
             doc = self._model.document
-            doc.select_rects(stagehand.card_rects(state.cards, card, *doc.extent))
+            doc.select_rects(stagehand.card_area(state.cards, card, *doc.extent))
 
         def set_box():
             assert self._model is not None
             doc = self._model.document
             if bounds := doc.selection_bounds:
                 card.places = [stagehand.rect_place(tuple(bounds), *doc.extent, grid=state.grid)]
+                self._edit(state)
 
-        on.toggled.connect(set_enabled)
-        select.clicked.connect(select_box)
+        def edit(field: str, widget: QPlainTextEdit):
+            setattr(card, field, widget.toPlainText())
+            self._edit(state)
+
+        on.toggled.connect(lambda value: self._edit(state, set_enabled(value)))
+        select.clicked.connect(select_area)
         place.clicked.connect(set_box)
         uc_button.toggled.connect(uc.setVisible)
-        prompt.textChanged.connect(lambda: setattr(card, "text", prompt.toPlainText()))
-        uc.textChanged.connect(lambda: setattr(card, "uc", uc.toPlainText()))
+        prompt.textChanged.connect(lambda: edit("text", prompt))
+        uc.textChanged.connect(lambda: edit("uc", uc))
         set_enabled(card.enabled)
         return frame

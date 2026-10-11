@@ -19,12 +19,11 @@ from .localization import translate as _
 from .model.control import ControlLayer, ControlLayerList
 from .model.custom_workflow import CustomWorkspace
 from .model.jobs import Job, JobKind, JobParams, JobQueue
-from .model.model import DocumentModel, InpaintContext
+from .model.model import DocumentModel, InpaintContext, job_metadata
 from .model.properties import deserialize, serialize
 from .model.region import Region, RootRegion
 from .settings import settings
 from .style import Style, Styles
-from .text import create_img_metadata
 from .util import client_logger as log
 from .util import encode_json
 
@@ -157,6 +156,7 @@ class ModelSync:
         state["root"] = _serialize(model.regions)
         state["edit"] = _serialize(model.edit_regions)
         state["control"] = [_serialize(c) for c in model.regions.control]
+        state["stagehand"] = model.stagehand.to_json() if model.stagehand else None
         state["regions"] = []
         for region in model.regions:
             state["regions"].append(_serialize(region))
@@ -176,6 +176,8 @@ class ModelSync:
         _deserialize_custom(model.custom, state.get("custom", {}), model.name)
         _deserialize(model.regions, state.get("root", {}))
         _deserialize(model.edit_regions, state.get("edit", {}))
+        if cards := state.get("stagehand"):  # a .kra keeps its Stagehand cards
+            model.stagehand = stagehand.State.from_json(cards)
         for control_state in state.get("control", []):
             _deserialize(model.regions.control.emplace(), control_state)
         for region_state in state.get("regions", []):
@@ -419,11 +421,9 @@ def export_prompt_to_file(model: DocumentModel, filename: str):
     if not settings.save_document_metadata or not filename.lower().endswith(".png"):
         return
 
-    if (job := model.jobs.last_applied()) and "forge_infotext" in job.params.metadata:
-        metadata = job.params.metadata["forge_infotext"]  # Forge's own, Stagehand's lines and all
-        source = "last applied Forge generation"
-    elif job:
-        metadata = create_img_metadata(job.params)
+    if job := model.jobs.last_applied():
+        index = next((i for i, used in job.in_use.items() if used), 0)
+        metadata = job_metadata(model, job, index)
         source = "last applied generation"
     else:
         metadata = model.source_metadata

@@ -189,8 +189,7 @@ class JobQueue(QObject):
             (
                 job
                 for job in reversed(self._entries)
-                if job.kind in (JobKind.diffusion, JobKind.animation)
-                and any(job.in_use.values())
+                if job.kind in (JobKind.diffusion, JobKind.animation) and any(job.in_use.values())
             ),
             None,
         )

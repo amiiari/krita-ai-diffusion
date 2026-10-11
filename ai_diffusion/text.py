@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import random
 import re
-from pathlib import Path
 from typing import NamedTuple
 
 from .backend.api import ConditioningInput, LoraInput, RegionInput
@@ -61,6 +60,12 @@ def strip_prompt_comments(prompt: str):
 
 
 def merge_prompt(prompt: str, style_prompt: str, language: str = ""):
+    phrase = " ".join(style_prompt.strip().strip(",").split())
+    if prompt and phrase and "{prompt}" not in style_prompt:
+        # the style's phrase is already in the prompt (eg. a prompt pasted from an image
+        # made with this style): don't append it a second time
+        if re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", " ".join(prompt.split())):
+            style_prompt = ""
     if language and prompt:
         prompt = f"lang:{language} {prompt} lang:en "
     if style_prompt == "":
@@ -76,21 +81,23 @@ def extract_loras(prompt: str, lora_files: FileCollection):
     loras: list[LoraInput] = []
 
     def replace(match: re.Match[str]):
-        lora_file = None
         input = match[1].lower()
-
-        for file in lora_files:
-            if file.source is not FileSource.unavailable:
-                lora_filename = Path(file.id).stem.lower()
-                lora_normalized = file.name.lower()
-                if input in (lora_filename, lora_normalized):
-                    lora_file = file
-                    break
-
-        if not lora_file:
+        requested = lora_name(input)
+        available = [f for f in lora_files if f.source is not FileSource.unavailable]
+        # with its folder ("characters/ava"), or its name alone when that is unambiguous
+        candidates = [f for f in available if requested in (lora_name(f.id), f.name.lower())]
+        if not candidates:
+            basename = requested.rsplit("/", 1)[-1]
+            candidates = [f for f in available if lora_name(f.id).rsplit("/", 1)[-1] == basename]
+        if len(candidates) > 1:
+            error = _("Ambiguous LoRA name, include its folder") + f": {input}"
+            log.warning(error)
+            raise PluginError(error)
+        if not candidates:
             error = _("LoRA not found") + f": {input}"
             log.warning(error)
             raise PluginError(error)
+        lora_file = candidates[0]
 
         lora_strength: float = lora_file.meta("lora_strength", 1.0)
         if match[2]:
@@ -307,11 +314,34 @@ def edit_attention(text: str, positive: bool) -> str:
 
 
 # creates the img text metadata for embedding in PNG files in style like Automatic1111
+def lora_name(name: str):
+    """A LoRA file id or tag as "folder/name": forward slashes, lower case, no .safetensors."""
+    name = name.replace("\\", "/").lower()
+    return name.removesuffix(".safetensors")
+
+
+def normalize_lora_tags(prompt: str):
+    """<lora:folder/Name.safetensors:0.8> as <lora:Name:0.8>, the way Forge writes them."""
+
+    def replace(match: re.Match[str]):
+        name = match[1].replace("\\", "/").rsplit("/", 1)[-1]
+        name = re.sub(r"\.safetensors$", "", name, flags=re.IGNORECASE)
+        return (
+            match[0][: match.start(1) - match.start()]
+            + name
+            + match[0][match.end(1) - match.start() :]
+        )
+
+    return pattern_lora.sub(replace, prompt)
+
+
 def create_img_metadata(params: JobParams):
+    """PNG info as Forge writes it, for the prompts as typed: LoRA tags where they were typed
+    (style-only LoRAs and the style's text aren't the user's prompt, so they're left out)."""
     meta = params.metadata
 
-    prompt = meta.get("prompt_final", meta.get("prompt", ""))
-    neg_prompt = meta.get("negative_prompt_final", meta.get("negative_prompt", ""))
+    prompt = normalize_lora_tags(meta.get("prompt", meta.get("prompt_final", "")))
+    neg_prompt = meta.get("negative_prompt", meta.get("negative_prompt_final", ""))
     sampler = meta.get("sampler", "")
     steps = meta.get("steps", 0)
     cfg_scale = meta.get("guidance", 0.0)
@@ -320,26 +350,10 @@ def create_img_metadata(params: JobParams):
     width = params.bounds.width
     height = params.bounds.height
     strength = meta.get("strength", None)
-    loras = meta.get("loras", [])
-
-    # Embed LoRAs in the prompt
-    lora_tags = ""
-    for lora in loras:
-        if isinstance(lora, dict):
-            name = lora.get("name")
-            weight = lora.get("weight", 0.0)
-        elif isinstance(lora, (list, tuple)) and len(lora) >= 2:
-            name, weight = lora[0], lora[1]
-        else:
-            continue
-        if weight != 0:
-            lora_tags += f" <lora:{name}:{weight}>"
-
-    full_prompt = f"{prompt.strip()}{lora_tags}"
 
     # Construct output
     lines = []
-    lines.append(full_prompt)
+    lines.append(prompt.strip())
     lines.append(f"Negative prompt: {neg_prompt}")
     lines.append(
         f"Steps: {steps}, Sampler: {sampler}, CFG scale: {cfg_scale}, Seed: {seed}, Size: {width}x{height}, Model hash: unknown, Model: {model}"

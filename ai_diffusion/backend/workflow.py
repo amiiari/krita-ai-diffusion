@@ -18,7 +18,7 @@ from ..text import (
     replace_layers,
     strip_prompt_comments,
 )
-from ..util import ensure, median_or_zero, unique
+from ..util import ensure, median_or_zero, unique_latest
 from . import resolution, resources
 from .api import (
     CheckpointInput,
@@ -1668,7 +1668,7 @@ def prepare(
     i.sampling = sampling_from_style(style, strength, is_live)
     i.sampling.seed = seed
     i.models = style.get_models(models.checkpoints)
-    i.models.loras = unique(i.models.loras + (loras or []), key=lambda l: l.name)
+    i.models.loras = unique_latest(i.models.loras + (loras or []), key=lambda l: l.name)
     i.models.dynamic_caching = perf.dynamic_caching
     i.models.tiled_vae = perf.tiled_vae
     arch = i.models.version = resolve_arch(style, models)

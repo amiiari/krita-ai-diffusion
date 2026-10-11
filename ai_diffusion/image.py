@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import struct
+import tempfile
 import zlib
 from collections.abc import Callable, Iterable
 from enum import Enum
@@ -450,53 +452,46 @@ class Image:
 
     @staticmethod
     def save_png_w_itxt(img_path: str | Path, png_data: bytes, keyword: str, text: str):
+        """Write png_data to img_path with an iTXt chunk `keyword` (after IHDR). The file is
+        built in memory and swapped in, so a failure mid-write can't cost the image."""
         if png_data[:8] != b"\x89PNG\r\n\x1a\n":
             raise ValueError("Not a valid PNG file")
 
-        offset = 8
-        ihdr_inserted = False
         keyword_bytes = keyword.encode("latin1")
+        itxt_data = (
+            keyword_bytes
+            + b"\x00"
+            + b"\x00"  # compression flag: 0 (not compressed)
+            + b"\x00"  # compression method: 0
+            + b"\x00"  # language tag: empty
+            + b"\x00"  # translated keyword: empty
+            + text.encode("utf-8")
+        )
+        itxt = struct.pack(">I", len(itxt_data)) + b"iTXt" + itxt_data
+        itxt += struct.pack(">I", zlib.crc32(b"iTXt" + itxt_data) & 0xFFFFFFFF)
 
-        with open(img_path, "wb") as f:
-            # Write PNG header
-            f.write(png_data[:8])
-
-            while offset < len(png_data):
-                length = struct.unpack(">I", png_data[offset : offset + 4])[0]
-                chunk_type = png_data[offset + 4 : offset + 8]
-                chunk_data = png_data[offset + 8 : offset + 8 + length]
-                crc = png_data[offset + 8 + length : offset + 12 + length]
-                offset += 12 + length
-
-                # Drop an existing text chunk with the same keyword: readers keep the last
-                # match, so a stale copy further down the file would shadow the one below.
-                if chunk_type in (b"tEXt", b"zTXt", b"iTXt"):
-                    if chunk_data.split(b"\x00", 1)[0] == keyword_bytes:
-                        continue
-
-                # Write original chunk
-                f.write(struct.pack(">I", length))
-                f.write(chunk_type)
-                f.write(chunk_data)
-                f.write(crc)
-
-                if not ihdr_inserted and chunk_type == b"IHDR":
-                    # Insert iTXt chunk after IHDR
-                    text_bytes = text.encode("utf-8")
-                    itxt_data = (
-                        keyword_bytes
-                        + b"\x00"
-                        + b"\x00"  # compression flag: 0 (not compressed)
-                        + b"\x00"  # compression method: 0
-                        + b"\x00"  # language tag: empty
-                        + b"\x00"  # translated keyword: empty
-                        + text_bytes
-                    )
-                    f.write(struct.pack(">I", len(itxt_data)))
-                    f.write(b"iTXt")
-                    f.write(itxt_data)
-                    f.write(struct.pack(">I", zlib.crc32(b"iTXt" + itxt_data) & 0xFFFFFFFF))
-                    ihdr_inserted = True
+        out = bytearray(png_data[:8])
+        offset = 8
+        while offset + 12 <= len(png_data):
+            length = struct.unpack(">I", png_data[offset : offset + 4])[0]
+            chunk_type = png_data[offset + 4 : offset + 8]
+            chunk_data = png_data[offset + 8 : offset + 8 + length]
+            end = offset + 12 + length
+            if end > len(png_data):
+                raise ValueError("Truncated PNG chunk")
+            chunk = png_data[offset:end]
+            offset = end
+            # Drop an existing text chunk with the same keyword: readers keep the last
+            # match, so a stale copy further down the file would shadow the new one.
+            if chunk_type in (b"tEXt", b"zTXt", b"iTXt"):
+                if chunk_data.split(b"\x00", 1)[0] == keyword_bytes:
+                    continue
+            out += chunk
+            if chunk_type == b"IHDR":
+                out += itxt
+            if chunk_type == b"IEND":
+                break
+        _replace_file(Path(img_path), bytes(out))
 
     @staticmethod
     def read_png_text(img_path: str | Path) -> dict[str, str]:
@@ -912,3 +907,27 @@ class Mask:
         painter = QPainter(img)
         painter.drawImage(self.bounds.x, self.bounds.y, self.image)
         return Image(img)
+
+
+def _replace_file(path: Path, data: bytes):
+    """Replace path's contents with data atomically (a temporary file, then a rename)."""
+    original = path.read_bytes() if path.exists() else None
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".ai-diffusion-")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            # Windows apps can hold a file open without FILE_SHARE_DELETE, which blocks the
+            # rename; write in place then, if nothing changed the file meanwhile.
+            with path.open("r+b") as handle:
+                if original is not None and handle.read() != original:
+                    raise OSError(f"{path} changed while it was being written; save again")
+                handle.seek(0)
+                handle.write(data)
+                handle.truncate()
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)

@@ -18,21 +18,31 @@ Generating sends the image's PNG info with the cards that are on to Forge's img2
 reads the Character lines back as cards. The pixels, the selection as inpaint mask, the
 strength and the seed come from Krita.
 
-Plain Python apart from the State's signal: python -m ai_diffusion.stagehand checks it.
+Images made with Precise Reference (with or without cards) go through Forge too: its
+references are the kept copies the PNG info points to, on Forge's own disk.
+
+The format and defaults mirror Stagehand (extensions/forge-stagehand: lib_stagehand/characters.py
+show/read/region_weights, scripts/precise_reference.py args_from_infotext); change them together.
+Plain Python apart from the State's signal: python ai_diffusion/stagehand.py checks it.
 """
 
 from __future__ import annotations
 
+import json
+import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
-FORGE_URL = "http://127.0.0.1:7860"
+from PyQt5.QtCore import QObject, pyqtSignal
+
 GRID = 5  # Stagehand's (NovelAI's) 5x5 position grid: columns A-E, rows 1-5
 SHARE = 50  # a character's default claim where her place overlaps someone else's, in percent
+REFS = 4  # Precise Reference's cards (MAX_REFS)
 
 # Stagehand's label (lib_stagehand/characters.py _LABEL): a character in several places is
 # "at 0 0 0.4 1 + 0.6 0 1 1" (or "at B3 + D3"), one with a non-default share ends ", share 70%"
-_PLACE = r"(?:[\d.]+ ){3}[\d.]+|[A-E][1-5]"
+_CELL = r"[A-E][1-5]"
+_PLACE = rf"(?:[\d.]+ ){{3}}[\d.]+|{_CELL}"
 LABEL = re.compile(
     rf"^Character (\d+)(?: \((.*?)\))?(?: at ((?:{_PLACE})(?: \+ (?:{_PLACE}))*))?(?:, share (\d{{1,3}})%)?:[ \t]?(.*)$"
 )
@@ -56,10 +66,26 @@ class Card:
 
 
 def is_stagehand(infotext: str):
-    return any(LABEL.match(line) for line in infotext.split("\n"))
+    """Made with Stagehand: Character Prompts cards, or Precise Reference."""
+    return any(LABEL.match(line) for line in infotext.split("\n")) or "PR 1 image" in params(
+        infotext
+    )
 
 
-def _sections(infotext: str):
+def params(infotext: str) -> dict[str, str]:
+    """The settings line's "Key: value" pairs, quoted values unquoted (Forge's unquote)."""
+    out = {}
+    for key, value in _PARAM.findall(sections(infotext)[2]):
+        if value.startswith('"') and value.endswith('"'):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                pass
+        out[key] = value
+    return out
+
+
+def sections(infotext: str):
     """(prompt section, negative section, settings line) of a PNG info text."""
     body, steps, settings = infotext.partition("\nSteps:")
     positive, marker, negative = body.partition("\nNegative prompt:")
@@ -85,7 +111,7 @@ def _read(section: str):
 
 def parse(infotext: str):
     """(main prompt, main negative, cards, settings line) of a Stagehand image's PNG info."""
-    positive, negative, settings = _sections(infotext)
+    positive, negative, settings = sections(infotext)
     base, chars = _read(positive)
     negative_base, ucs = _read(negative)
     cards = []
@@ -117,9 +143,17 @@ def infotext(base: str, negative: str, cards: list[Card], settings: str):
     return text + ("\n" + settings if settings else "")
 
 
+def _is_cell(place: str):
+    return re.fullmatch(_CELL, place) is not None
+
+
+def _cell_point(cell: str):
+    return (ord(cell[0]) - 65 + 0.5) / GRID, (int(cell[1]) - 0.5) / GRID
+
+
 def place_rect(place: str, width: int, height: int):
     """A place as a pixel rectangle (x, y, w, h): a box, or a grid cell's square."""
-    if re.fullmatch(r"[A-E][1-5]", place):
+    if _is_cell(place):
         col, row = ord(place[0]) - 65, int(place[1]) - 1
         x0, y0, x1, y1 = col / GRID, row / GRID, (col + 1) / GRID, (row + 1) / GRID
     else:
@@ -141,23 +175,94 @@ def rect_place(rect: tuple[int, int, int, int], width: int, height: int, grid: b
 
 
 def uses_grid(cards: list[Card]):
-    return any(re.fullmatch(r"[A-E][1-5]", p) for c in cards for p in c.places)
+    return any(_is_cell(p) for c in cards for p in c.places)
 
 
-def card_rects(cards: list[Card], card: Card, width: int, height: int):
-    """Where a card stands, in pixels: her places, or Stagehand's default for a card without
-    one -- equal columns in card order among the cards that are on (Grid: across the middle
-    row, rows 2 and 4 past five)."""
+def _places(cards: list[Card], card: Card):
+    """A card's places, or Stagehand's default for one without: equal columns in card order
+    among the cards that are on (Grid: across the middle row, rows 2 and 4 past five)."""
     if card.places:
-        return [place_rect(p, width, height) for p in card.places]
+        return card.places
     on = [c for c in cards if c.enabled or c is card]
     k, count = on.index(card), len(on)
     if uses_grid(cards):
         row = 3 if count <= GRID else (2 if k % 2 == 0 else 4)
         col = min(int((k + 0.5) / count * GRID), GRID - 1)
-        return [place_rect(f"{chr(65 + col)}{row}", width, height)]
-    x0, x1 = round(k / count * width), round((k + 1) / count * width)
-    return [(x0, 0, x1 - x0, height)]
+        return [f"{chr(65 + col)}{row}"]
+    return [f"{k / count:.4f} 0 {(k + 1) / count:.4f} 1"]
+
+
+def card_area(cards: list[Card], card: Card, width: int, height: int):
+    """Where a card's prompt applies, as pixel rectangles (x, y, w, h). Boxes are themselves;
+    with Grid positions every spot belongs to the nearest dot of the cards that are on
+    (Stagehand's region_weights, distances in fractions of the image), so her area is a row
+    span per pixel row -- one straight-edged patch per dot."""
+    mine = _places(cards, card)
+    if not uses_grid(cards):
+        return [place_rect(p, width, height) for p in mine]
+    own = [_cell_point(p) for p in mine if _is_cell(p)]
+    others = [
+        _cell_point(p)
+        for c in cards
+        if c is not card and c.enabled
+        for p in _places(cards, c)
+        if _is_cell(p)
+    ]
+    rects = []
+    for i, (px, py) in enumerate(own):
+        rivals = others + own[:i] + own[i + 1 :]
+        for row in range(height):
+            y = (row + 0.5) / height
+            lo, hi = 0.0, 1.0
+            for qx, qy in rivals:  # nearer p than q: a*x <= c
+                a, c = 2 * (qx - px), qx * qx - px * px + qy * qy - py * py - 2 * y * (qy - py)
+                if a > 0:
+                    hi = min(hi, c / a)
+                elif a < 0:
+                    lo = max(lo, c / a)
+                elif c < 0:
+                    lo, hi = 1.0, 0.0
+            # the pixels whose centers (i + 0.5) / width lie in [lo, hi]
+            x0, x1 = (
+                max(math.ceil(lo * width - 0.5), 0),
+                min(math.floor(hi * width - 0.5), width - 1),
+            )
+            if x0 <= x1:
+                rects.append((x0, row, x1 - x0 + 1, 1))
+    return rects
+
+
+def reference_args(infotext: str):
+    """Precise Reference's script args for the image's references, or None without any --
+    its args_from_infotext: [4 x (image, type, strength, fidelity), ADetailer (old), on,
+    4 x (for, in Hires, in ADetailer)]. Forge's API drops the image when it pastes infotext,
+    so the paths (its kept copies, on Forge's disk) go as args; the script loads them."""
+    p = params(infotext)
+    legacy = p.get("PR in ADetailer", "False")
+
+    def number(key, default):
+        try:
+            return float(p[key])
+        except (KeyError, ValueError):
+            return default
+
+    cards, extras = [], []
+    for n in range(1, REFS + 1):
+        old = f"PR {n} image" in p and f"PR {n} hires" not in p
+        cards += [
+            p.get(f"PR {n} image") or None,
+            p.get(f"PR {n} type", "Character"),
+            number(f"PR {n} strength", 1.0),
+            number(f"PR {n} fidelity", 1.0),
+        ]
+        extras += [
+            p.get(f"PR {n} for", "Whole image"),
+            p.get(f"PR {n} hires", str(old)) == "True",
+            p.get(f"PR {n} ADetailer", legacy if old else "False") == "True",
+        ]
+    if not any(cards[i * 4] for i in range(REFS)):
+        return None
+    return cards + [False, True] + extras
 
 
 def payload(
@@ -168,17 +273,22 @@ def payload(
     seed: int,
     width: int,
     height: int,
+    task_id: str,
+    count: int = 1,
+    only_masked: bool = True,
     padding: int = 32,
+    mask_blur: int = 4,
 ):
     """Forge img2img request: settings and characters from the PNG info, the rest from Krita.
-    With a mask it's Forge's "Inpaint masked, Only masked, original content" (Stagehand moves
-    the characters' places into the crop's frame).
+    With a mask it's Forge's "Inpaint masked, original content", Only masked by default
+    (Stagehand moves the characters' places into the crop's frame). `task_id` is how Forge's
+    progress tells this job apart from someone else's on a shared Forge.
 
     Forge applies `infotext` like its paste button -- sampler, steps, model and the scripts'
     fields -- except img2img's own fields, which have no API names there: the prompts (with
     the Character lines Stagehand reads), CFG and Shift are sent explicitly."""
-    positive, negative, settings = _sections(text)
-    params = dict(_PARAM.findall(settings))
+    positive, negative, _settings = sections(text)
+    pasted = params(text)
     request = {
         "prompt": positive,
         "negative_prompt": negative,
@@ -189,51 +299,63 @@ def payload(
         "width": width,
         "height": height,
         "batch_size": 1,
-        "n_iter": 1,
+        "n_iter": count,
         "save_images": False,
         "send_images": True,
+        "force_task_id": task_id,
     }
-    for key, label in (("cfg_scale", "CFG scale"), ("distilled_cfg_scale", "Shift"),
-                       ("distilled_cfg_scale", "Distilled CFG Scale"), ("image_cfg_scale", "Image CFG scale")):
+    for key, label in (
+        ("cfg_scale", "CFG scale"),
+        ("distilled_cfg_scale", "Shift"),
+        ("distilled_cfg_scale", "Distilled CFG Scale"),
+        ("image_cfg_scale", "Image CFG scale"),
+    ):
         try:
-            request[key] = float(params[label])
+            request[key] = float(pasted[label])
         except (KeyError, ValueError):
             pass
     if mask_b64:
         request.update(
             mask=mask_b64,
             inpainting_fill=1,
-            inpaint_full_res=True,
+            inpaint_full_res=only_masked,
             inpaint_full_res_padding=padding,
             inpainting_mask_invert=0,
-            mask_blur=4,
+            mask_blur=mask_blur,
         )
+    if refs := reference_args(text):
+        request["alwayson_scripts"] = {"Precise Reference": {"args": refs}}
     return request
 
 
-try:
-    from PyQt5.QtCore import QObject, pyqtSignal
+class State(QObject):
+    """A document's Stagehand cards and the settings line its PNG info came with. `changed`
+    fires on edits (the document keeps a copy, so a .kra reopens with its cards)."""
 
-    class State(QObject):
-        """A document's Stagehand cards and the settings line its PNG info came with."""
+    changed = pyqtSignal()
 
-        changed = pyqtSignal()
+    def __init__(self, cards: list[Card], settings: str, enabled=True):
+        super().__init__()
+        self.cards = cards
+        self.settings = settings
+        self.enabled = enabled  # off: generate with ComfyUI as usual
 
-        def __init__(self, cards: list[Card], settings: str):
-            super().__init__()
-            self.cards = cards
-            self.settings = settings
-            self.enabled = True  # off: generate with ComfyUI as usual
+    @property
+    def grid(self):
+        return uses_grid(self.cards)
 
-        @property
-        def grid(self):
-            return uses_grid(self.cards)
+    def infotext(self, base: str, negative: str):
+        return infotext(base, negative, self.cards, self.settings)
 
-        def infotext(self, base: str, negative: str):
-            return infotext(base, negative, self.cards, self.settings)
+    def to_json(self):
+        cards = [asdict(c) for c in self.cards]
+        return json.dumps({"cards": cards, "settings": self.settings, "enabled": self.enabled})
 
-except ImportError:  # outside Krita without PyQt: the plain functions still check
-    pass
+    @staticmethod
+    def from_json(text: str):
+        data = json.loads(text)
+        cards = [Card(**c) for c in data["cards"]]
+        return State(cards, data["settings"], data.get("enabled", True))
 
 
 if __name__ == "__main__":
@@ -252,33 +374,91 @@ if __name__ == "__main__":
     assert settings == "Steps: 30, Sampler: ER SDE, Seed: 1, Size: 768x1024"
     ava, two = cards
     assert (ava.number, ava.name, ava.text, ava.places) == (
-        1, "Ava (Game)", "girl, purple hair\nblush", ["0.000 0.000 0.524 1.000", "0.518 0.000 1.000 0.561"]
+        1,
+        "Ava (Game)",
+        "girl, purple hair\nblush",
+        ["0.000 0.000 0.524 1.000", "0.518 0.000 1.000 0.561"],
     ), ava
     assert (two.share, two.uc, two.text) == (70, "tan, dark skin", "girl, red hair, source#hug")
     # unchanged cards write the PNG info back as Stagehand wrote it
-    assert infotext(base, negative, cards, settings) == info, infotext(base, negative, cards, settings)
+    assert infotext(base, negative, cards, settings) == info, infotext(
+        base, negative, cards, settings
+    )
     # a card switched off leaves her lines and her Undesired Content out
     two.enabled = False
     off = infotext(base, negative, cards, settings)
     assert "Character 2" not in off and "red hair" not in off and "tan" not in off, off
-    assert off.endswith("blush\nNegative prompt: worst quality,\nSteps: 30, Sampler: ER SDE, Seed: 1, Size: 768x1024"), off
+    assert off.endswith(
+        "blush\nNegative prompt: worst quality,\nSteps: 30, Sampler: ER SDE, Seed: 1, Size: 768x1024"
+    ), off
     # boxes <-> pixels
     assert place_rect("0.500 0.000 1.000 0.500", 768, 1024) == (384, 0, 384, 512)
     assert rect_place((384, 0, 384, 512), 768, 1024, grid=False) == "0.500 0.000 1.000 0.500"
     assert place_rect("C3", 500, 500) == (200, 200, 100, 100)
     assert rect_place((210, 380, 60, 60), 500, 500, grid=True) == "C5"
     assert uses_grid([Card(1, places=["B3"])]) and not uses_grid(cards)
-    assert card_rects(cards, ava, 100, 100) == [(0, 0, 52, 100), (52, 0, 48, 56)]
+    assert card_area(cards, ava, 100, 100) == [(0, 0, 52, 100), (52, 0, 48, 56)]
     plain = [Card(1, text="a"), Card(2, text="b"), Card(3, text="c")]
-    assert card_rects(plain, plain[2], 300, 100) == [(200, 0, 100, 100)]
+    assert card_area(plain, plain[2], 300, 100) == [(200, 0, 100, 100)]
     plain[1].enabled = False  # off: the others share the width
-    assert card_rects(plain, plain[2], 300, 100) == [(150, 0, 150, 100)]
-    # the request: inpaint only with a mask
-    assert "mask" not in payload("t", "img", None, 0.5, 7, 64, 64)
-    inpaint = payload(info, "img", "m", 0.4, 7, 64, 64)
-    assert inpaint["inpaint_full_res"] and inpaint["inpainting_fill"] == 1 and inpaint["infotext"] == info
+    assert card_area(plain, plain[2], 300, 100) == [(150, 0, 150, 100)]
+    # Grid: nearest dot. B3 and D3 split at the middle; C1 over C5 split at the middle row
+    side = [Card(1, places=["B3"]), Card(2, places=["D3"])]
+    assert set(card_area(side, side[0], 10, 4)) == {(0, r, 5, 1) for r in range(4)}
+    stack = [Card(1, places=["C1"]), Card(2, places=["C5"])]
+    assert card_area(stack, stack[1], 4, 10) == [(0, r, 4, 1) for r in range(5, 10)]
+    diag = [Card(1, places=["A1"]), Card(2, places=["E5"])]  # the diagonal x + y = 1
+    assert all(x + w <= 10 - r for x, r, w, _ in card_area(diag, diag[0], 10, 10))
+    two_dots = [Card(1, places=["A3", "E3"]), Card(2, places=["C3"])]  # both ends are hers
+    assert {x for x, *_ in card_area(two_dots, two_dots[0], 10, 1)} == {0, 7}
+    # quoted values (Windows paths have colons) and Precise Reference's args
+    pr = 'p\nSteps: 30, PR 1 image: "C:\\\\refs\\\\a b.png", PR 1 strength: 0.77, PR 1 for: Character 2'
+    assert is_stagehand(pr) and params(pr)["PR 1 image"] == "C:\\refs\\a b.png"
+    args = reference_args(pr)
+    assert len(args) == REFS * 4 + 2 + REFS * 3 and args[:4] == [
+        "C:\\refs\\a b.png",
+        "Character",
+        0.77,
+        1.0,
+    ]
+    assert args[16:20] == [False, True, "Character 2", True], args[16:20]  # an old image: in Hires
+    assert reference_args(info) is None
+    # the request: inpaint only with a mask; the task id, batch count and inpaint settings
+    assert "mask" not in payload("t", "img", None, 0.5, 7, 64, 64, "id")
+    inpaint = payload(
+        info, "img", "m", 0.4, 7, 64, 64, "forge-1", count=3, only_masked=False, padding=8
+    )
+    assert (
+        inpaint["inpainting_fill"] == 1
+        and inpaint["infotext"] == info
+        and not inpaint["inpaint_full_res"]
+    )
+    assert (inpaint["force_task_id"], inpaint["n_iter"], inpaint["inpaint_full_res_padding"]) == (
+        "forge-1",
+        3,
+        8,
+    )
+    assert (
+        "alwayson_scripts" not in inpaint
+        and payload(pr, "i", None, 1, 7, 8, 8, "x")["alwayson_scripts"]
+    )
     # the fields Forge's img2img API doesn't take from infotext
-    assert inpaint["prompt"].endswith("source#hug") and inpaint["negative_prompt"].endswith("tan, dark skin")
-    shifted = payload("p\nSteps: 30, Sampler: ER SDE, CFG scale: 4.5, Shift: 3, Seed: 1", "img", None, 1, 7, 64, 64)
+    assert inpaint["prompt"].endswith("source#hug") and inpaint["negative_prompt"].endswith(
+        "tan, dark skin"
+    )
+    shifted = payload(
+        "p\nSteps: 30, Sampler: ER SDE, CFG scale: 4.5, Shift: 3, Seed: 1",
+        "img",
+        None,
+        1,
+        7,
+        64,
+        64,
+        "x",
+    )
     assert (shifted["cfg_scale"], shifted["distilled_cfg_scale"]) == (4.5, 3.0), shifted
+    # a .kra keeps the cards
+    two.enabled = False
+    back = State.from_json(State(cards, settings, enabled=False).to_json())
+    assert back.cards == cards and back.settings == settings and back.enabled is False
     print("ok")

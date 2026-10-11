@@ -1,3 +1,5 @@
+import pytest
+
 from ai_diffusion.backend.api import ConditioningInput, ControlInput, LoraInput
 from ai_diffusion.backend.resources import ControlMode
 from ai_diffusion.files import File, FileCollection
@@ -95,6 +97,14 @@ def test_strip_prompt_comments_hex_color():
     )
 
 
+def test_merge_prompt_phrase_already_there():
+    assert merge_prompt("masterpiece, best quality, a cat", "masterpiece, best quality,") == (
+        "masterpiece, best quality, a cat"
+    )
+    assert merge_prompt("a cat", "best quality") == "a cat, best quality"
+    assert merge_prompt("best qualityx", "best quality") == "best qualityx, best quality"
+
+
 def test_merge_prompt():
     assert merge_prompt("a", "b") == "a, b"
     assert merge_prompt("", "b") == "b"
@@ -162,6 +172,19 @@ def test_extract_loras():
         extract_loras("a ship <lora:lora-one:test-invalid-str>", loras)
     except Exception as e:
         assert str(e).startswith("Invalid LoRA strength")
+
+
+def test_extract_loras_folders():
+    loras = FileCollection()
+    loras.add(File.remote("characters/ava.safetensors"))
+    loras.add(File.remote("styles/ink.safetensors"))
+    loras.add(File.remote("old/ink.safetensors"))
+
+    assert extract_loras("x <lora:characters/ava:0.5>", loras)[1] == [LoraInput(loras[0].id, 0.5)]
+    assert extract_loras("x <lora:Ava.safetensors>", loras)[1] == [LoraInput(loras[0].id, 1.0)]
+    assert extract_loras("x <lora:styles/ink>", loras)[1] == [LoraInput(loras[1].id, 1.0)]
+    with pytest.raises(Exception, match="Ambiguous LoRA name"):
+        extract_loras("x <lora:ink>", loras)  # two of them: never guess
 
 
 def test_extract_loras_meta():
@@ -268,29 +291,23 @@ def test_create_img_metadata_basic():
     )
 
 
-def test_create_img_metadata_loras_dict_and_tuple():
-    bounds = Bounds(0, 0, 128, 128)
-
+def test_create_img_metadata_prompt_as_typed():
+    """The typed prompts with their LoRA tags where they were typed (as Forge names them);
+    the style's text and style-only LoRAs aren't the user's prompt."""
     metadata = {
-        "prompt": "Prompt",
-        "negative_prompt": "",
+        "prompt": "<lora:folder/Ava.safetensors:0.7>, a ship",
+        "prompt_final": "<lora:folder/Ava.safetensors:0.7>, a ship, style words",
+        "negative_prompt": "blurry",
+        "negative_prompt_final": "blurry, style negative",
         "sampler": "Euler - euler_a",
         "steps": 20,
         "guidance": 7.0,
         "checkpoint": "loramodel.ckpt",
-        "loras": [{"name": "lora1", "weight": 0.7}, ("lora2", 0.5), ["lora3", 0.9]],
+        "loras": [{"name": "style-only", "weight": 0.7}],
     }
-
-    job_params = JobParams(
-        bounds=bounds,
-        name="test",
-        metadata=metadata,
-        seed=0,
-    )
-    result = create_img_metadata(job_params)
-    assert "<lora:lora1:0.7>" in result
-    assert "<lora:lora2:0.5>" in result
-    assert "<lora:lora3:0.9>" in result
+    result = create_img_metadata(JobParams(Bounds(0, 0, 128, 128), "test", metadata=metadata))
+    assert result.startswith("<lora:Ava:0.7>, a ship\nNegative prompt: blurry\nSteps: 20")
+    assert "style" not in result
 
 
 def test_create_img_metadata_strength_none_and_one():

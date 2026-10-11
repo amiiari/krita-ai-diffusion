@@ -54,6 +54,7 @@ from .settings_widgets import (
     SliderSetting,
     SpinBoxSetting,
     SwitchSetting,
+    TextSetting,
 )
 from .style import StylePresets
 from .theme import add_header, green, grey, logo, prompt_max_line_count, red, yellow
@@ -751,6 +752,13 @@ class InterfaceSettings(SettingsTab):
         self.add("save_image_format", ComboBoxSetting(S._save_image_format, parent=self))
         self.add("save_image_metadata", SwitchSetting(S._save_image_metadata, parent=self))
         self.add("save_document_metadata", SwitchSetting(S._save_document_metadata, parent=self))
+        self.add("forge_url", TextSetting(S._forge_url, self))
+        self.add("forge_only_masked", SwitchSetting(S._forge_only_masked, parent=self))
+        self.add(
+            "forge_inpaint_padding",
+            SpinBoxSetting(S._forge_inpaint_padding, self, 0, 256, suffix=" px"),
+        )
+        self.add("forge_mask_blur", SpinBoxSetting(S._forge_mask_blur, self, 0, 64, suffix=" px"))
         self.add("debug_dump_workflow", SwitchSetting(S._debug_dump_workflow, parent=self))
 
         self._widgets["save_image_format"].value_changed.connect(self._update_image_format_widgets)

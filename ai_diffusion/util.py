@@ -146,6 +146,13 @@ def unique(seq: Sequence[T], key) -> list[T]:
     return [x for x in seq if (k := key(x)) not in seen and not seen.add(k)]
 
 
+def unique_latest(seq: Sequence[T], key) -> list[T]:
+    """unique() in first-seen order, each key's last item winning: a LoRA weight typed in
+    the prompt (later) overrides the style's (earlier)."""
+    latest = {key(x): x for x in seq}
+    return [latest[key(x)] for x in unique(seq, key)]
+
+
 def flatten(seq: Sequence[T | list[T]]) -> Generator[T, None, None]:
     for x in seq:
         if isinstance(x, list):

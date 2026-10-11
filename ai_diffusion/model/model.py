@@ -60,7 +60,7 @@ from ..settings import (
 )
 from ..style import Arch, Style, Styles
 from ..text import create_img_metadata, extract_layers
-from ..util import PluginError, clamp, ensure, trim_text, unique
+from ..util import PluginError, clamp, ensure, trim_text, unique_latest
 from ..util import client_logger as log
 from .connection import Connection, ConnectionState
 from .control import ControlLayer
@@ -175,6 +175,7 @@ class DocumentModel(QObject, ObservableProperties):
         # Metadata the document's file had when it was opened. Saving overwrites the file, so
         # it has to be captured up front to be able to preserve it.
         self.source_metadata: str = ""
+        self._forge_cancelled: set[str] = set()  # Forge jobs cancelled while Forge still runs them
         self.generate_seed()
         self.jobs = JobQueue()
         self.regions = RootRegion(self)
@@ -187,6 +188,7 @@ class DocumentModel(QObject, ObservableProperties):
         self._style_connection: QMetaObject.Connection | None = None
 
         self.jobs.selection_changed.connect(self.update_preview)
+        self.stagehand_changed.connect(self._track_stagehand)
         connection.state_changed.connect(self._init_on_connect)
         connection.error_changed.connect(self._forward_error)
         self.custom.validation_error_changed.connect(self._forward_validation_error)
@@ -243,18 +245,24 @@ class DocumentModel(QObject, ObservableProperties):
         """A Stagehand image: Forge's img2img with its PNG info and the cards that are on, and
         the selection as inpaint mask (stagehand.py) -- Stagehand runs exactly as in Forge."""
         assert self.stagehand is not None
+        forge = settings.forge_url.rstrip("/")
         extent = self._doc.extent
         positive, negative = self.regions.positive, self.regions.negative
         mask = self._doc.selection_mask()
         seed = self.seed if self.fixed_seed else workflow.generate_seed()
-        image = self._get_current_image(Bounds(0, 0, *extent))
+        job_id = f"forge-{uuid.uuid4()}"
         request = stagehand.payload(
             self.stagehand.infotext(positive, negative),
-            image.to_base64(),
+            self._get_current_image(Bounds(0, 0, *extent)).to_base64(),
             mask.to_base64() if mask else None,
             self.strength,
             seed,
             *extent,
+            job_id,
+            count=self.batch_count,
+            only_masked=settings.forge_only_masked,
+            padding=settings.forge_inpaint_padding,
+            mask_blur=settings.forge_mask_blur,
         )
         params = JobParams(Bounds(0, 0, *extent), positive, seed=seed)
         params.metadata.update(prompt=positive, negative_prompt=negative, strength=self.strength)
@@ -262,33 +270,48 @@ class DocumentModel(QObject, ObservableProperties):
         if not self.jobs.any_executing():
             self.progress = 0.0
         job = self.jobs.add(JobKind.diffusion, params)
-        job.id = f"forge-{uuid.uuid4()}"
-        self.handle_message(ClientMessage(ClientEvent.queued, job.id))
+        job.id = job_id
+        self.handle_message(ClientMessage(ClientEvent.queued, job_id))
 
         net = RequestManager()
-        progress = asyncio.ensure_future(self._forge_progress(net, job.id))
+        progress = asyncio.ensure_future(self._forge_progress(net, forge, job_id))
         try:
-            result = await net.post(f"{stagehand.FORGE_URL}/sdapi/v1/img2img", request)
+            result = await net.post(f"{forge}/sdapi/v1/img2img", request)
+            if job_id in self._forge_cancelled:  # Forge hands back what it had when interrupted
+                self.handle_message(ClientMessage(ClientEvent.interrupted, job_id))
+                return
+            info = json.loads(result.get("info") or "{}")
+            # with a batch, Forge may put a grid of them first
+            first = info.get("index_of_first_image", 0)
+            images = ImageCollection(
+                Image.from_base64(b) for b in result["images"][first : first + self.batch_count]
+            )
+            job.params.metadata["forge_infotexts"] = info.get("infotexts", [])[first:]
         except Exception as e:
-            self.handle_message(ClientMessage(ClientEvent.error, job.id, error=f"Forge: {e}"))
+            self.handle_message(ClientMessage(ClientEvent.error, job_id, error=f"Forge: {e}"))
             return
         finally:
             progress.cancel()
-        info = json.loads(result.get("info") or "{}")
-        if infotexts := info.get("infotexts"):
-            job.params.metadata["forge_infotext"] = infotexts[0]  # what saving writes
-        images = ImageCollection([Image.from_base64(result["images"][0])])
-        self.handle_message(ClientMessage(ClientEvent.finished, job.id, images=images))
+            self._forge_cancelled.discard(job_id)
+        self.handle_message(ClientMessage(ClientEvent.finished, job_id, images=images))
 
-    async def _forge_progress(self, net: RequestManager, job_id: str):
+    def _track_stagehand(self, state: stagehand.State | None):
+        if state is not None:  # card edits are saved with the document (.kra)
+            state.changed.connect(lambda: self.modified.emit(self, "stagehand"))
+
+    async def _forge_progress(self, net: RequestManager, forge: str, job_id: str):
+        """Forge's progress while it runs this job -- not someone else's on a shared Forge."""
         while True:
             await asyncio.sleep(0.5)
             try:
-                r = await net.get(f"{stagehand.FORGE_URL}/sdapi/v1/progress?skip_current_image=true", 5)
-            except Exception:
+                r = await net.get(f"{forge}/sdapi/v1/progress?skip_current_image=true", 5)
+            except Exception as e:  # Forge busy or restarting: ask again
+                log.debug(f"Forge progress: {e}")
                 continue
-            if r.get("progress"):
-                self.handle_message(ClientMessage(ClientEvent.progress, job_id, progress=r["progress"]))
+            if r.get("current_task") == job_id and r.get("progress"):
+                self.handle_message(
+                    ClientMessage(ClientEvent.progress, job_id, progress=r["progress"])
+                )
 
     def _prepare_workflow(self, dryrun=False):
         arch = self.arch
@@ -620,7 +643,7 @@ class DocumentModel(QObject, ObservableProperties):
                 prepared = workflow.prepare_prompts(cond, style, seed, arch)
                 custom_input.positive_evaluated = prepared.metadata["prompt_final"]
                 custom_input.negative_evaluated = prepared.metadata["negative_prompt_final"]
-                custom_input.models.loras = unique(
+                custom_input.models.loras = unique_latest(
                     custom_input.models.loras + prepared.loras, key=lambda l: l.name
                 )
 
@@ -698,8 +721,11 @@ class DocumentModel(QObject, ObservableProperties):
         if queued and (to_cancel := self.clear_queued()):
             self._connection.cancel(to_cancel)
         if active and self.jobs.any_executing():
-            if any(j.id and j.id.startswith("forge-") for j in self.jobs if j.state is JobState.executing):
-                eventloop.run(_interrupt_forge())
+            executing = [j.id for j in self.jobs if j.state is JobState.executing and j.id]
+            if forge_jobs := [id for id in executing if id.startswith("forge-")]:
+                # one still waiting in Forge's queue runs anyway; its result is dropped
+                self._forge_cancelled.update(forge_jobs)
+                eventloop.run(_report_errors(self, _interrupt_forge(forge_jobs)))
             else:
                 self._connection.interrupt()
 
@@ -1671,9 +1697,28 @@ def calc_selection_pre_process(
     return inpaint
 
 
-async def _interrupt_forge():
+async def _interrupt_forge(job_ids: list[str]):
+    """Interrupt Forge only while it runs one of these jobs: its interrupt stops whatever is
+    running, and a shared Forge may be running someone else's."""
+    # ponytail: check-then-interrupt can race a task switch inside Forge; Forge has no
+    # per-task interrupt to do better
+    forge = settings.forge_url.rstrip("/")
     net = RequestManager()
-    await net.post(f"{stagehand.FORGE_URL}/sdapi/v1/interrupt", {})
+    progress = await net.get(f"{forge}/sdapi/v1/progress?skip_current_image=true", 5)
+    if progress.get("current_task") in job_ids:
+        await net.post(f"{forge}/sdapi/v1/interrupt", {})
+
+
+def job_metadata(model: DocumentModel, job: Job, index: int = 0):
+    """PNG info for one of a job's results: Forge's own for a Forge job, Krita's otherwise --
+    with a Stagehand image's cards written in, so dropping it into Forge gives them back."""
+    if infotexts := job.params.metadata.get("forge_infotexts"):
+        return infotexts[min(index, len(infotexts) - 1)]
+    text = create_img_metadata(job.params)
+    if model.stagehand:
+        positive, negative, generation = stagehand.sections(text)
+        text = stagehand.infotext(positive, negative, model.stagehand.cards, generation)
+    return text
 
 
 async def _report_errors(parent: DocumentModel, coro):
@@ -1716,7 +1761,7 @@ def _save_job_result(model: DocumentModel, job: Job | None, index: int):
     base_image.draw_image(result_image, job.params.bounds.offset)
 
     if settings.save_image_metadata and ext == ".png":
-        metadata_text = create_img_metadata(job.params)
+        metadata_text = job_metadata(model, job, index)
         base_image.save_png_with_metadata(
             filepath=path, metadata_text=metadata_text, format=settings.save_image_format
         )
