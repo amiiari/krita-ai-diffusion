@@ -264,7 +264,9 @@ class DocumentModel(QObject, ObservableProperties):
             padding=settings.forge_inpaint_padding,
             mask_blur=settings.forge_mask_blur,
         )
-        params = JobParams(Bounds(0, 0, *extent), positive, seed=seed)
+        selection = self._doc.selection_bounds if mask else None
+        name = stagehand.job_name(self._stagehand_cards(selection), self.strength, mask is not None)
+        params = JobParams(Bounds(0, 0, *extent), name, seed=seed)
         params.metadata.update(prompt=positive, negative_prompt=negative, strength=self.strength)
         self.clear_error()
         if not self.jobs.any_executing():
@@ -294,6 +296,26 @@ class DocumentModel(QObject, ObservableProperties):
             progress.cancel()
             self._forge_cancelled.discard(job_id)
         self.handle_message(ClientMessage(ClientEvent.finished, job_id, images=images))
+
+    def _stagehand_cards(self, selection: Bounds | None):
+        """The cards a generation is about: every card that's on, or with a selection those
+        of the characters under it."""
+        assert self.stagehand is not None
+        cards = self.stagehand.cards
+        if selection is None:
+            return [c for c in cards if c.enabled]
+        return stagehand.characters_in(cards, tuple(selection), *self._doc.extent)
+
+    def _add_stagehand_cards(self, conditioning: ConditioningInput, selection: Bounds | None):
+        """Generating a Stagehand image with ComfyUI (Forge switched off): the main prompt
+        plus the cards of the characters it's about -- inpainting one face doesn't pull in
+        another character's hair. Krita regions set up by hand win."""
+        if not self.stagehand or self.stagehand.enabled or conditioning.regions:
+            return
+        chosen = self._stagehand_cards(selection)
+        conditioning.positive, conditioning.negative = stagehand.plain_prompts(
+            conditioning.positive, conditioning.negative, chosen
+        )
 
     def _track_stagehand(self, state: stagehand.State | None):
         if state is not None:  # card edits are saved with the document (.kra)
@@ -346,6 +368,7 @@ class DocumentModel(QObject, ObservableProperties):
         if not dryrun:
             conditioning, job_regions = process_regions(regions, bounds, region_layer)
             conditioning.language = self.prompt_translation_language
+            self._add_stagehand_cards(conditioning, selection_bounds)
         else:
             conditioning, job_regions = ConditioningInput("", ""), []
 
@@ -472,6 +495,7 @@ class DocumentModel(QObject, ObservableProperties):
 
         if params.use_prompt and not dryrun:
             conditioning, job_regions = process_regions(self.regions, bounds, min_coverage=0)
+            self._add_stagehand_cards(conditioning, None)
             conditioning.language = self.prompt_translation_language
             for region in job_regions:
                 region.bounds = Bounds.scale(region.bounds, params.factor)

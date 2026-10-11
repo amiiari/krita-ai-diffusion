@@ -33,6 +33,7 @@ from .widget import ResizeHandle, TextPromptWidget
 
 class StagehandWidget(QWidget):
     main_prompt_hidden = pyqtSignal(bool)
+    forge_toggled = pyqtSignal(bool)
 
     def __init__(self, parent: QWidget):
         super().__init__(parent)
@@ -145,6 +146,7 @@ class StagehandWidget(QWidget):
         except TypeError:
             pass  # nothing connected yet
         self._forge.toggled.connect(lambda on: self._edit(state, setattr(state, "enabled", on)))
+        self._forge.toggled.connect(self.forge_toggled)
         for card in state.cards:
             self._layout.addWidget(self._card(state, card))
         self._layout.addStretch()

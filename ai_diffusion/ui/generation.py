@@ -763,6 +763,7 @@ class GenerationWidget(QWidget):
         )
         layout.addWidget(self.stagehand_cards)
         layout.insertWidget(0, self.stagehand_cards.header)  # its show / hide bar: on top
+        self.stagehand_cards.forge_toggled.connect(lambda _: self.update_generate_options())
 
         self.strength_slider = StrengthWidget(parent=self)
         self.layer_count_widget = LayerCountWidget(self)
@@ -853,6 +854,7 @@ class GenerationWidget(QWidget):
                 model.region_only_changed.connect(self.update_generate_options),
                 model.style_changed.connect(self.update_generate_options),
                 model.edit_mode_changed.connect(self.update_generate_options),
+                model.stagehand_changed.connect(self.update_generate_options),
                 self.add_control_button.clicked.connect(self.add_control),
                 self.add_region_button.clicked.connect(self.add_region),
                 self.region_prompt.activated.connect(model.generate),
@@ -1062,6 +1064,24 @@ class GenerationWidget(QWidget):
                     icon = "inpaint-custom"
                 else:
                     icon = "edit"
+
+        # A Stagehand image with Forge on: Forge inpaints the selection with the image's own
+        # settings, so Krita's inpaint modes, regions and control layers don't apply (the style
+        # stays: it holds the settings button, and applies again with Forge off)
+        forge = bool(self.model.stagehand and self.model.stagehand.enabled)
+        for widget in (self.add_control_button, self.add_region_button):
+            widget.setVisible(not forge)
+        if forge:
+            self.inpaint_mode_button.setVisible(False)
+            self.region_mask_button.setVisible(False)
+            self.custom_inpaint.setVisible(False)
+            if self.model.document.selection_bounds is not None:
+                text, icon = _("Inpaint"), "inpaint-automatic"
+            elif self.model.strength == 1.0:
+                text, icon = _("Generate"), "workspace-generation"
+            else:
+                text, icon = _("Refine"), "refine"
+            text += " · Forge"
 
         self.generate_button.operation = text
         self.generate_button.setIcon(theme.icon(icon))

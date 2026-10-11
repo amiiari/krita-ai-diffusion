@@ -46,6 +46,9 @@ _PLACE = rf"(?:[\d.]+ ){{3}}[\d.]+|{_CELL}"
 LABEL = re.compile(
     rf"^Character (\d+)(?: \((.*?)\))?(?: at ((?:{_PLACE})(?: \+ (?:{_PLACE}))*))?(?:, share (\d{{1,3}})%)?:[ \t]?(.*)$"
 )
+# NovelAI's interaction tags (source#hug, target#hug, mutual#hug): Stagehand reads them, a
+# generator without it (ComfyUI) gets the plain tag
+INTERACTION = re.compile(r"\b(?:source|target|mutual)#\s*")
 # one "Key: value" of the settings line (Forge's infotext_utils.re_param)
 _PARAM = re.compile(r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)')
 
@@ -230,6 +233,40 @@ def card_area(cards: list[Card], card: Card, width: int, height: int):
             if x0 <= x1:
                 rects.append((x0, row, x1 - x0 + 1, 1))
     return rects
+
+
+def characters_in(cards: list[Card], rect, width: int, height: int, share=0.2, samples=24):
+    """The cards (on) an area is about: those whose area covers at least `share` of rect
+    (x, y, w, h in pixels). A spot outside every box is nobody's (the main prompt alone)."""
+    n = 64  # the areas on a coarse canvas: plenty to tell who is where
+    areas = {c.number: card_area(cards, c, n, n) for c in cards if c.enabled}
+    counts = dict.fromkeys(areas, 0)
+    x, y, w, h = rect
+    for i in range(samples):
+        px = int((x + (i + 0.5) * w / samples) / width * n)
+        for j in range(samples):
+            py = int((y + (j + 0.5) * h / samples) / height * n)
+            for number, rects in areas.items():
+                if any(rx <= px < rx + rw and ry <= py < ry + rh for rx, ry, rw, rh in rects):
+                    counts[number] += 1
+    return [c for c in cards if c.enabled and counts[c.number] >= share * samples * samples]
+
+
+def plain_prompts(base: str, negative: str, cards: list[Card]):
+    """The main prompts with these cards' text added, for a generator without Stagehand
+    (ComfyUI): each card on its own line after a comma, interaction tags as plain tags."""
+
+    def merge(main: str, texts: list[str]):
+        texts = [INTERACTION.sub("", t.strip()) for t in texts if t.strip()]
+        return ",\n".join(p for p in [main.rstrip().rstrip(","), *texts] if p)
+
+    return merge(base, [c.text for c in cards]), merge(negative, [c.uc for c in cards])
+
+
+def job_name(chosen: list[Card], strength: float, masked: bool):
+    """A Forge job in the history: what it did, how strongly, and to whom."""
+    who = ", ".join(c.name or f"Character {c.number}" for c in chosen) or "main prompt"
+    return f"Forge {'inpaint' if masked else 'img2img'} {round(strength * 100)}%: {who}"
 
 
 def reference_args(infotext: str):
@@ -457,6 +494,21 @@ if __name__ == "__main__":
         "x",
     )
     assert (shifted["cfg_scale"], shifted["distilled_cfg_scale"]) == (4.5, 3.0), shifted
+    # who an inpaint is about: Lux's face is hers alone, the gap between boxes is nobody's
+    lux = [Card(1, "Leona", places=["0.6 0 1 1"]), Card(2, "Lux", places=["0 0 0.5 1"])]
+    assert [c.name for c in characters_in(lux, (100, 50, 80, 80), 768, 1024)] == ["Lux"]
+    assert characters_in(lux, (400, 50, 50, 50), 768, 1024) == []
+    both = characters_in(lux, (200, 0, 400, 300), 768, 1024)
+    assert [c.name for c in both] == ["Leona", "Lux"], both
+    lux[0].enabled = False  # off: never chosen
+    assert [c.name for c in characters_in(lux, (0, 0, 768, 1024), 768, 1024)] == ["Lux"]
+    pos, neg = plain_prompts(
+        "main, a,", "bad", [Card(1, text="girl, source#hug", uc="tan"), Card(2, text=" ")]
+    )
+    assert (pos, neg) == ("main, a,\ngirl, hug", "bad,\ntan"), (pos, neg)
+    assert plain_prompts("main", "", []) == ("main", "")
+    assert job_name(lux[1:], 0.4, True) == "Forge inpaint 40%: Lux"
+    assert job_name([], 1, False) == "Forge img2img 100%: main prompt"
     # a .kra keeps the cards
     two.enabled = False
     back = State.from_json(State(cards, settings, enabled=False).to_json())
