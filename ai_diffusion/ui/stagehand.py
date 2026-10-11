@@ -42,6 +42,7 @@ class StagehandWidget(QWidget):
         self._collapsed: set[int] = set()  # cards folded to their header (this session)
         self._prompts: list[TextPromptWidget] = []
         self._folds: dict[int, Callable[[bool], None]] = {}  # card number -> fold it (or not)
+        self._uc_buttons: list[tuple[QToolButton, stagehand.Card]] = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -65,7 +66,10 @@ class StagehandWidget(QWidget):
         self._negative.setCheckable(True)
         self._negative.setChecked(settings.show_negative_prompt)
         self._negative.setToolTip(
-            _("Show or hide the main negative prompt box (hidden, it is still used)")
+            _(
+                "Show or hide every negative prompt: the main one and the characters' Undesired"
+                " Content (hidden, they are still used). A card's UC button shows just hers."
+            )
         )
         self._negative.toggled.connect(self._show_negative)
         settings.changed.connect(self._settings_changed)
@@ -132,6 +136,7 @@ class StagehandWidget(QWidget):
                 widget.deleteLater()
         self._prompts = []
         self._folds = {}
+        self._uc_buttons = []
         state = self._model.stagehand if self._model else None
         self.setVisible(state is not None)
         self.header.setVisible(state is not None)
@@ -170,6 +175,9 @@ class StagehandWidget(QWidget):
         if key == "show_negative_prompt":  # also when changed in AI Diffusion's settings
             with theme.SignalBlocker(self._negative):
                 self._negative.setChecked(bool(value))
+            # the characters' Undesired Content with it (those that have any)
+            for button, card in self._uc_buttons:
+                button.setChecked(bool(value) and bool(card.uc.strip()))
 
     def _fold_all(self):
         state = self._model.stagehand if self._model else None
@@ -263,9 +271,11 @@ class StagehandWidget(QWidget):
         uc = TextPromptWidget(line_count=2, is_negative=True, parent=frame)
         uc.text = card.uc
         uc.setPlaceholderText(_("Her Undesired Content"))
-        uc_button.setChecked(bool(card.uc))
+        shown = settings.show_negative_prompt and bool(card.uc.strip())
+        uc_button.setChecked(shown)
+        self._uc_buttons.append((uc_button, card))
         prompt.setVisible(not folded)
-        uc.setVisible(not folded and bool(card.uc))
+        uc.setVisible(not folded and shown)
         layout.addWidget(prompt)
         layout.addWidget(uc)
         self._prompts.append(prompt)
@@ -311,6 +321,7 @@ class StagehandWidget(QWidget):
         uc_button.toggled.connect(
             lambda shown: uc.setVisible(shown and card.number not in self._collapsed)
         )
+        uc_button.toggled.connect(lambda _: self._fit())  # no gap where a hidden box was
         prompt.text_changed.connect(lambda text: edit("text", text))
         uc.text_changed.connect(lambda text: edit("uc", text))
         if self._model:
