@@ -742,3 +742,30 @@ async def test_apply_region_group(workflows_dir: Path):
         assert isinstance(r2_right, tuple) and r2_right[3] == 0, (
             "result2: right side must be transparent"
         )
+
+
+def test_job_metadata_keeps_forge_settings():
+    """A ComfyUI touch-up of a Forge image keeps its Forge settings line (Forge's hires fix
+    reads it) and, for a Stagehand image, the main prompts as typed plus the cards."""
+    from types import SimpleNamespace
+
+    from ai_diffusion import stagehand
+    from ai_diffusion.model.model import job_metadata
+
+    forge = "Steps: 30, Sampler: ER SDE, Schedule type: Beta, CFG scale: 4.5, Shift: 3, Seed: 7"
+    meta = {"prompt": "beach,\nlux", "negative_prompt": "worst", "sampler": "Alternative - Euler A"}
+    meta.update(steps=30, guidance=4.0, checkpoint="anima", strength=0.27)
+    job = SimpleNamespace(params=JobParams(Bounds(0, 0, 64, 64), "x", metadata=meta, seed=1))
+    regions = SimpleNamespace(positive="beach", negative="worst")
+
+    plain = SimpleNamespace(stagehand=None, source_metadata=f"a\n{forge}", regions=regions)
+    assert job_metadata(plain, job) == f"beach,\nlux\nNegative prompt: worst\n{forge}"  # type: ignore
+
+    cards = [stagehand.Card(1, "Lux", "lux")]
+    shaped = SimpleNamespace(stagehand=stagehand.State(cards, forge), regions=regions)
+    assert job_metadata(shaped, job) == (  # type: ignore
+        f"beach\n\nCharacter 1 (Lux): lux\nNegative prompt: worst\n{forge}"
+    )
+
+    fresh = SimpleNamespace(stagehand=None, source_metadata="", regions=regions)
+    assert "Sampler: Alternative - Euler A" in job_metadata(fresh, job)  # type: ignore

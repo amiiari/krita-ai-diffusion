@@ -1735,13 +1735,25 @@ async def _interrupt_forge(job_ids: list[str]):
 
 def job_metadata(model: DocumentModel, job: Job, index: int = 0):
     """PNG info for one of a job's results: Forge's own for a Forge job, Krita's otherwise --
-    with a Stagehand image's cards written in, so dropping it into Forge gives them back."""
+    with a Stagehand image's cards written in, so dropping it into Forge gives them back.
+
+    A ComfyUI touch-up of a Forge image keeps the Forge settings line it came with: Krita's
+    ("Alternative - Euler A", no schedule or shift) means nothing to Forge, whose batch hires
+    fix then falls back to its default sampler and smears the image."""
     if infotexts := job.params.metadata.get("forge_infotexts"):
         return infotexts[min(index, len(infotexts) - 1)]
     text = create_img_metadata(job.params)
+    positive, negative, generation = stagehand.sections(text)
     if model.stagehand:
-        positive, negative, generation = stagehand.sections(text)
-        text = stagehand.infotext(positive, negative, model.stagehand.cards, generation)
+        # the main prompts as typed: the job's have the cards' text merged in (plain_prompts)
+        return stagehand.infotext(
+            model.regions.positive,
+            model.regions.negative,
+            model.stagehand.cards,
+            model.stagehand.settings or generation,
+        )
+    if source := stagehand.sections(model.source_metadata)[2]:
+        return stagehand.infotext(positive, negative, [], source)
     return text
 
 
