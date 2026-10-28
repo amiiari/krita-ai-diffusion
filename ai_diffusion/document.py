@@ -89,6 +89,9 @@ class Document(QObject):
     def selection_bounds(self) -> Bounds | None:
         return None
 
+    def partial_selection_bounds(self) -> Bounds | None:
+        return None
+
     @property
     def resolution(self) -> float:
         return 0.0
@@ -202,11 +205,8 @@ class KritaDocument(Document):
         return True, None
 
     def create_mask_from_selection(self, mod: SelectionModifiers):
-        user_selection = self._doc.selection()
+        user_selection = self._partial_selection()
         if not user_selection:
-            return None, None
-
-        if _selection_is_entire_document(user_selection, self.extent):
             return None, None
 
         selection = user_selection.duplicate()
@@ -279,27 +279,49 @@ class KritaDocument(Document):
     def selection_bounds(self):
         return self._selection_bounds
 
+    def _partial_selection(self) -> krita.Selection | None:
+        """The selection, or None when nothing (or an empty selection) or everything is
+        selected -- both mean "the whole image" to inpaint."""
+        selection = self._doc.selection()
+        if not selection or selection.width() <= 0 or selection.height() <= 0:
+            return None
+        if _selection_is_entire_document(selection, self.extent):
+            return None
+        return selection
+
+    def partial_selection_bounds(self) -> Bounds | None:
+        """Bounds of the selection, read now (not the polled selection_bounds), or None when
+        nothing or everything is selected."""
+        selection = self._partial_selection()
+        return _selection_bounds(selection) if selection else None
+
     def selection_mask(self) -> Image | None:
         """The selection over the whole image (grayscale), or None when nothing or everything
         is selected -- what Forge's inpaint takes as its mask."""
-        selection = self._doc.selection()
-        if not selection or _selection_is_entire_document(selection, self.extent):
+        selection = self._partial_selection()
+        if not selection:
             return None
         return Image.from_packed_bytes(selection.pixelData(0, 0, *self.extent), self.extent, 1)
 
-    def select_rects(self, rects: list[tuple[int, int, int, int]]):
+    def select_rects(self, rects: list[tuple[int, int, int, int]]) -> bool:
         """Replace the selection with these rectangles (x, y, width, height). Written as a
         whole-image mask: Selection.resize() selects everything it covers, so building the
-        selection from resize() + select() selected the whole image."""
+        selection from resize() + select() selected the whole image. Rectangles that cover
+        no pixel deselect instead (an empty selection would read as a 0x0 box); returns
+        whether anything got selected."""
         width, height = self.extent
         mask = bytearray(width * height)
         for x, y, w, h in rects:
             x0, x1 = max(x, 0), min(x + w, width)
             for row in range(max(y, 0), min(y + h, height)):
                 mask[row * width + x0 : row * width + x1] = b"\xff" * max(x1 - x0, 0)
+        if b"\xff" not in mask:
+            self._doc.setSelection(None)
+            return False
         selection = krita.Selection()
-        selection.setPixelData(QByteArray(bytes(mask)), 0, 0, width, height)
+        selection.setPixelData(QByteArray(mask), 0, 0, width, height)
         self._doc.setSelection(selection)
+        return True
 
     @property
     def resolution(self):
@@ -359,7 +381,7 @@ def _selection_is_entire_document(selection: krita.Selection, extent: Extent):
     if bounds.width + bounds.x < extent.width or bounds.height + bounds.y < extent.height:
         return False
     mask = selection.pixelData(*bounds)
-    return all(x == b"\xff" for x in mask)
+    return mask.count(b"\xff") == mask.size()
 
 
 class PoseLayers:

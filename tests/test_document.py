@@ -86,7 +86,7 @@ async def test_selection_bounds_changed():
     kd.selection_bounds_changed.connect(lambda: received.append(True))
 
     sel = Selection()
-    sel.setPixelData(QByteArray(bytes(100 * 80)), 10, 20, 100, 80)
+    sel.setPixelData(QByteArray(b"\xff" * (100 * 80)), 10, 20, 100, 80)
     kd._doc._selection = sel  # type: ignore[attr-defined]
 
     # The poller fires every 20 ms; wait up to ~300 ms for the signal.
@@ -97,6 +97,25 @@ async def test_selection_bounds_changed():
 
     assert received, "selection_bounds_changed was not emitted within timeout"
     assert kd.selection_bounds == Bounds(10, 20, 100, 80)
+
+
+def test_select_rects():
+    Krita.instance().openDocument("")  # 512x512
+    kd = KritaDocument.active()
+    assert kd is not None
+
+    assert kd.select_rects([(10, 10, 20, 20)])
+    assert kd.partial_selection_bounds() == Bounds(10, 10, 20, 20)
+    assert kd.selection_mask() is not None
+
+    assert not kd.select_rects([])  # nothing to select: deselects, no 0x0 box
+    assert kd._doc.selection() is None  # type: ignore[attr-defined]
+    assert kd.partial_selection_bounds() is None
+    assert not kd.select_rects([(600, 600, 10, 10)])  # off the image
+
+    assert kd.select_rects([(0, 0, 512, 512)])  # the whole image: no inpaint mask
+    assert kd.partial_selection_bounds() is None
+    assert kd.selection_mask() is None
 
 
 @qtapp

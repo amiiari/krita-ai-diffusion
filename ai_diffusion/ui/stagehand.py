@@ -9,16 +9,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PyQt5.QtCore import QMetaObject, QObject, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QMetaObject, QObject, QPoint, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtWidgets import (
     QCheckBox,
     QFrame,
     QHBoxLayout,
-    QMessageBox,
     QScrollArea,
     QSizePolicy,
     QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -40,6 +40,8 @@ class StagehandWidget(QWidget):
         super().__init__(parent)
         self._model: DocumentModel | None = None
         self._connection: QMetaObject.Connection | None = None
+        self._selection_connection: QMetaObject.Connection | None = None
+        self._box_buttons: list[QToolButton] = []  # enabled while part of the image is selected
         self._collapsed: set[int] = set()  # cards folded to their header (this session)
         self._prompts: list[TextPromptWidget] = []
         self._folds: dict[int, Callable[[bool], None]] = {}  # card number -> fold it (or not)
@@ -123,11 +125,15 @@ class StagehandWidget(QWidget):
 
     @model.setter
     def model(self, model: DocumentModel):
-        if self._connection:
-            QObject.disconnect(self._connection)
+        for connection in (self._connection, self._selection_connection):
+            if connection:
+                QObject.disconnect(connection)
         self._model = model
         self._collapsed.clear()
         self._connection = model.stagehand_changed.connect(self._rebuild)
+        self._selection_connection = model.document.selection_bounds_changed.connect(
+            self._update_box_buttons
+        )
         self._rebuild()
 
     def resizeEvent(self, a0):
@@ -144,6 +150,7 @@ class StagehandWidget(QWidget):
         self._prompts = []
         self._folds = {}
         self._uc_buttons = []
+        self._box_buttons = []
         state = self._model.stagehand if self._model else None
         self.setVisible(state is not None)
         self.header.setVisible(state is not None)
@@ -163,6 +170,7 @@ class StagehandWidget(QWidget):
             self._layout.addWidget(self._card(state, card))
         self._layout.addStretch()
         self._update_fold_button()
+        self._update_box_buttons()
         self._fit()
 
     @staticmethod
@@ -197,8 +205,12 @@ class StagehandWidget(QWidget):
             if c.enabled
             for r in stagehand.card_area(state.cards, c, *doc.extent)
         ]
-        if rects:
-            doc.select_rects(rects)
+        _note_whole_image(self._show_all, doc, doc.select_rects(rects))
+
+    def _update_box_buttons(self):
+        enabled = self._model is not None and bool(self._model.document.partial_selection_bounds())
+        for button in self._box_buttons:
+            button.setEnabled(enabled)
 
     def _fold_all(self):
         state = self._model.stagehand if self._model else None
@@ -272,7 +284,10 @@ class StagehandWidget(QWidget):
         select.setToolTip(_("Select where her prompt applies -- inpaint it with Generate"))
         place = QToolButton(frame)
         place.setText(_("Box"))
-        place.setToolTip(_("Make the current selection's bounds her box"))
+        place.setToolTip(
+            _("Make the current selection's bounds her box (select an area first, any tool)")
+        )
+        self._box_buttons.append(place)
         uc_button = QToolButton(frame)
         uc_button.setText(_("UC"))
         uc_button.setCheckable(True)
@@ -322,22 +337,14 @@ class StagehandWidget(QWidget):
         def select_area():
             assert self._model is not None
             doc = self._model.document
-            doc.select_rects(stagehand.card_area(state.cards, card, *doc.extent))
+            selected = doc.select_rects(stagehand.card_area(state.cards, card, *doc.extent))
+            _note_whole_image(select, doc, selected)
 
         def set_box():
             assert self._model is not None
             doc = self._model.document
-            bounds = doc.selection_bounds
-            if not bounds or doc.selection_mask() is None:  # nothing, or everything, selected
-                QMessageBox.information(
-                    self,
-                    _("Set her box"),
-                    _(
-                        "Select an area first (any selection tool), then click Box: its bounds become"
-                    )
-                    + f" {card.title}"
-                    + _("'s box."),
-                )
+            bounds = doc.partial_selection_bounds()  # read now: the polled bounds can lag
+            if not bounds:  # Box is disabled then; a selection changed since the last poll
                 return
             card.places = [stagehand.rect_place(tuple(bounds), *doc.extent, grid=state.grid)]
             self._edit(state)
@@ -364,3 +371,15 @@ class StagehandWidget(QWidget):
             uc.activated.connect(self._model.generate)
         set_enabled(card.enabled)
         return frame
+
+
+def _note_whole_image(button: QWidget, doc, selected: bool):
+    """Select / All gave no area, or all of the image: then Generate repaints everything (no
+    inpaint mask), so say so where the click was."""
+    if selected and doc.partial_selection_bounds():
+        return
+    if selected:
+        text = _("That is the whole image: Generate repaints everything")
+    else:
+        text = _("No area to select: Generate repaints the whole image")
+    QToolTip.showText(button.mapToGlobal(QPoint(0, button.height())), text, button)

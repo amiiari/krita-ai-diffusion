@@ -421,35 +421,32 @@ class Selection(QObject):
         self._width = 0
         self._height = 0
         self._data = QByteArray()
+        self._bounds = (0, 0, 0, 0)
 
-    def _exact(self) -> tuple[int, int, int, int]:
-        """Bounds of the selected (non-zero) pixels, as Krita's selectedExactRect()."""
-        data = bytes(self._data)
-        if not data or self._width == 0:
-            return self._x, self._y, self._width, self._height
-        rows = [
-            r for r in range(self._height) if any(data[r * self._width : (r + 1) * self._width])
-        ]
-        if not rows:  # nothing selected: the data's rect (what the upstream tests expect)
-            return self._x, self._y, self._width, self._height
-        cols = [
-            c
-            for c in range(self._width)
-            if any(data[r * self._width + c] for r in range(rows[0], rows[-1] + 1))
-        ]
-        return self._x + cols[0], self._y + rows[0], cols[-1] - cols[0] + 1, rows[-1] - rows[0] + 1
+    def _update_bounds(self):
+        """Bounds of the selected (non-zero) pixels, as Krita's selectedExactRect() -- 0x0 when
+        nothing is selected. Computed when the selection is written, not on every read."""
+        data, w = bytes(self._data), self._width
+        rows = [r for r in range(self._height) if data[r * w : (r + 1) * w].strip(b"\0")]
+        if not rows:
+            self._bounds = (0, 0, 0, 0)
+            return
+        lines = [data[r * w : (r + 1) * w] for r in rows]
+        left = min(len(line) - len(line.lstrip(b"\0")) for line in lines)
+        right = max(len(line.rstrip(b"\0")) for line in lines)
+        self._bounds = (self._x + left, self._y + rows[0], right - left, rows[-1] - rows[0] + 1)
 
     def x(self) -> int:
-        return self._exact()[0]
+        return self._bounds[0]
 
     def y(self) -> int:
-        return self._exact()[1]
+        return self._bounds[1]
 
     def width(self) -> int:
-        return self._exact()[2]
+        return self._bounds[2]
 
     def height(self) -> int:
-        return self._exact()[3]
+        return self._bounds[3]
 
     def pixelData(self, x: int, y: int, w: int, h: int) -> QByteArray:
         result = bytearray(w * h)  # default: fully unselected (0)
@@ -476,12 +473,14 @@ class Selection(QObject):
         self._y = y
         self._width = w
         self._height = h
+        self._update_bounds()
 
     def resize(self, w: int, h: int) -> None:
         # as Krita's: it *selects* the whole rect (which is how select_rects used to select
         # everything)
         self._x, self._y, self._width, self._height = 0, 0, w, h
         self._data = QByteArray(b"\xff" * (w * h))
+        self._update_bounds()
 
     def select(self, x: int, y: int, w: int, h: int, value: int) -> None:
         data = bytearray(bytes(self._data))
@@ -489,6 +488,7 @@ class Selection(QObject):
         for row in range(max(y - self._y, 0), min(y - self._y + h, self._height)):
             data[row * self._width + x0 : row * self._width + x1] = bytes([value]) * max(x1 - x0, 0)
         self._data = QByteArray(bytes(data))
+        self._update_bounds()
 
     def duplicate(self) -> Selection:
         copy = Selection()
@@ -497,6 +497,7 @@ class Selection(QObject):
         copy._width = self._width
         copy._height = self._height
         copy._data = QByteArray(self._data)
+        copy._bounds = self._bounds
         return copy
 
     def invert(self) -> None:
