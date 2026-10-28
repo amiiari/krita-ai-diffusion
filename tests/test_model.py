@@ -132,6 +132,16 @@ def workflows_dir(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def test_every_property_has_its_signal():
+    """A Property without its `<name>_changed` signal breaks binding it (the docker stops
+    half-way through switching documents, before the Stagehand cards)."""
+    from ai_diffusion.model.properties import PropertyImpl
+
+    for name, attr in vars(DocumentModel).items():
+        if isinstance(attr, PropertyImpl):
+            assert hasattr(DocumentModel, f"{name}_changed"), name
+
+
 @qtapp
 async def test_generate_simple(workflows_dir: Path):
     """With no selection and strength=1.0 the forwarded workflow should be WorkflowKind.generate."""
@@ -397,6 +407,39 @@ async def test_job_queued_progress_error(workflows_dir: Path):
         await _wait_for_job_state(job, JobState.cancelled)
         assert model.error.kind is ErrorKind.server_error
         assert "CUDA out of memory" in model.error.message
+
+
+@qtapp
+async def test_transparent_cuts_finish_in_order(workflows_dir: Path, monkeypatch):
+    """Results waiting for Forge's cut (the Transparent toggle) are delivered in job order:
+    a later job finishing first would cancel the earlier one. A warning comes once."""
+    from ai_diffusion import transparent
+
+    delays = iter([0.05, 0.0])  # job1's cut is slower
+
+    async def cut(_forge, images):
+        await asyncio.sleep(next(delays))
+        return images
+
+    monkeypatch.setattr(transparent, "cut", cut)
+    krita_doc = Krita.instance().openDocument("test")
+    async with _model_env(krita_doc, workflows_dir) as (model, client):
+        model.transparent = True
+        jobs = []
+        for _ in range(2):
+            job = await _run_generate(model, client)
+            assert job.id is not None and job.params.cutout
+            client.push(ClientMessage(ClientEvent.queued, job.id))
+            await _wait_for_job_state(job, JobState.executing)
+            jobs.append(job)
+        finished = []
+        model.jobs.job_finished.connect(lambda j: finished.append(j.id))
+        images = ImageCollection([Image.create(Extent(512, 512))])
+        for job in jobs:
+            client.push(ClientMessage(ClientEvent.finished, job.id, images=images, error="w"))
+        await _wait_for_job_state(jobs[1], JobState.finished)
+        assert finished == [jobs[0].id, jobs[1].id]
+        assert jobs[0].state is JobState.finished  # not cancelled by job2
 
 
 @qtapp

@@ -253,7 +253,7 @@ class ActiveRegionWidget(QFrame):
         self.positive.move_cursor_to_end()
         self._link_button.setVisible(not is_root_region)
         self._remove_button.setVisible(not is_root_region)
-        self.positive.setVisible(region is not None)
+        self.positive.setVisible(region is not None and not self.positive_hidden)
         self._no_region.setVisible(region is None)
 
     def focus(self):
@@ -353,6 +353,8 @@ class ActiveRegionWidget(QFrame):
         self._is_slim = value
         self._update_prompt_widgets()
 
+    positive_hidden = False  # Stagehand's "Prompt" off: only the negative prompt shows
+
     @property
     def has_negative(self):
         return settings.show_negative_prompt and isinstance(self._region, RootRegion)
@@ -361,7 +363,8 @@ class ActiveRegionWidget(QFrame):
         if key in {"prompt_line_count", "prompt_line_count_live"}:
             self._update_prompt_widgets()
         elif key == "show_negative_prompt":
-            self.negative.text = ""
+            # hiding it only hides it: the document keeps (and uses) its negative prompt
+            self.negative.text = self._region.negative if isinstance(self._region, RootRegion) else ""
             self._update_prompt_widgets()
         elif key == "prompt_translation":
             self._update_language()
@@ -542,6 +545,18 @@ class RegionPromptWidget(QWidget):
         self._control.model = region.control
         self._show_inactive_regions()
 
+    def hide_positive(self, hidden: bool):
+        """Stagehand's "Prompt" off: the prompts go, the main negative stays while shown."""
+        self._prompt.positive_hidden = hidden
+        self._update_hidden()
+
+    def _update_hidden(self):
+        hidden = self._prompt.positive_hidden
+        self._prompt.positive.setVisible(not hidden and self._prompt.region is not None)
+        for widget in self._inactive_regions:  # their rows would show the hidden prompts
+            widget.setVisible(not hidden)
+        self.setVisible(not hidden or self._prompt.has_negative)  # the main one: root region
+
     def _add_inactive_region(self, region: RootRegion | Region, layout: QVBoxLayout):
         widget = InactiveRegionWidget(region, self)
         widget.activated.connect(self._activate_region)
@@ -564,6 +579,7 @@ class RegionPromptWidget(QWidget):
             self._add_inactive_region(region, self._regions_below)
         if not isinstance(active, RootRegion):
             self._add_inactive_region(self._regions, self._regions_below)
+        self._update_hidden()
 
     def _activate_region(self, region: RootRegion | Region):
         self._regions.active = region

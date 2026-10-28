@@ -759,9 +759,7 @@ class GenerationWidget(QWidget):
         layout.addWidget(self.region_prompt)
 
         self.stagehand_cards = StagehandWidget(self)
-        self.stagehand_cards.main_prompt_hidden.connect(
-            lambda hidden: self.region_prompt.setVisible(not hidden)
-        )
+        self.stagehand_cards.main_prompt_hidden.connect(self.region_prompt.hide_positive)
         layout.addWidget(self.stagehand_cards)
         layout.insertWidget(0, self.stagehand_cards.header)  # its show / hide bar: on top
         self.stagehand_cards.forge_toggled.connect(lambda _: self.update_generate_options())
@@ -811,6 +809,16 @@ class GenerationWidget(QWidget):
         generate_layout.addWidget(self.inpaint_mode_button)
         generate_layout.addWidget(self.region_mask_button)
 
+        self.transparent_button = QToolButton(self)
+        self.transparent_button.setIcon(theme.icon("transparent"))
+        self.transparent_button.setCheckable(True)
+        self.transparent_button.setFixedHeight(self.generate_button.height() - 2)
+        self.transparent_button.setToolTip(
+            _("Transparent: cut the background out of the results (needs Forge Stagehand). "
+              "Editing a canvas that already has transparency keeps it without this.")
+        )
+        generate_layout.addWidget(self.transparent_button)
+
         self.queue_button = QueueButton(parent=self)
         self.queue_button.setFixedHeight(self.generate_button.height() - 2)
 
@@ -847,6 +855,7 @@ class GenerationWidget(QWidget):
                 bind(model, "layer_count", self.layer_count_widget, "value"),
                 bind(model, "error", self.error_box, "error", Bind.one_way),
                 bind_toggle(model, "region_only", self.region_mask_button),
+                bind_toggle(model, "transparent", self.transparent_button),
                 model.inpaint.mode_changed.connect(self.update_generate_options),
                 model.strength_changed.connect(self.update_generate_options),
                 model.document.selection_bounds_changed.connect(self.update_generate_options),

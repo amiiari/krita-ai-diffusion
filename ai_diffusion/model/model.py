@@ -17,7 +17,7 @@ from typing import Any, NamedTuple
 from PyQt5.QtCore import QMetaObject, QObject, Qt, QUuid, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QPainter
 
-from .. import eventloop, stagehand, util
+from .. import eventloop, stagehand, transparent, util
 from ..backend import resolution, workflow
 from ..backend.api import (
     ConditioningInput,
@@ -141,6 +141,7 @@ class DocumentModel(QObject, ObservableProperties):
     fixed_seed = Property(False, persist=True)
     resolution_multiplier = Property(1.0, persist=True)
     queue_mode = Property(QueueMode.back, persist=True)
+    transparent = Property(False, persist=True)  # cut the background out (transparent.py)
     translation_enabled = Property(True, persist=True)
     layer_count = Property(4, persist=True)
     progress_kind = Property(ProgressKind.generation)
@@ -159,6 +160,7 @@ class DocumentModel(QObject, ObservableProperties):
     fixed_seed_changed = pyqtSignal(bool)
     resolution_multiplier_changed = pyqtSignal(float)
     queue_mode_changed = pyqtSignal(QueueMode)
+    transparent_changed = pyqtSignal(bool)
     translation_enabled_changed = pyqtSignal(bool)
     layer_count_changed = pyqtSignal(int)
     progress_kind_changed = pyqtSignal(ProgressKind)
@@ -176,6 +178,7 @@ class DocumentModel(QObject, ObservableProperties):
         # it has to be captured up front to be able to preserve it.
         self.source_metadata: str = ""
         self._forge_cancelled: set[str] = set()  # Forge jobs cancelled while Forge still runs them
+        self._last_cut: asyncio.Task | None = None  # results being cut, delivered in order
         self.generate_seed()
         self.jobs = JobQueue()
         self.regions = RootRegion(self)
@@ -263,6 +266,7 @@ class DocumentModel(QObject, ObservableProperties):
             only_masked=settings.forge_only_masked,
             padding=settings.forge_inpaint_padding,
             mask_blur=settings.forge_mask_blur,
+            transparent=self.transparent,
         )
         selection = self._doc.selection_bounds if mask else None
         name = stagehand.job_name(self._stagehand_cards(selection), self.strength, mask is not None)
@@ -296,6 +300,30 @@ class DocumentModel(QObject, ObservableProperties):
             progress.cancel()
             self._forge_cancelled.discard(job_id)
         self.handle_message(ClientMessage(ClientEvent.finished, job_id, images=images))
+
+    async def _cut(self, message: ClientMessage, previous: asyncio.Task | None):
+        """Results with their background cut away by Forge Stagehand (the Transparent toggle,
+        or an input that had transparency). Delivered after the job before them: finishing a
+        job cancels the earlier ones still running (JobQueue.notify_finished)."""
+        try:
+            images = await transparent.cut(settings.forge_url, ensure(message.images))
+        except Exception as e:
+            msg = _("Transparent: Forge didn't cut the background")
+            self.report_error(Error(ErrorKind.warning, f"{msg} ({e})"))
+            images = message.images
+        if previous is not None:
+            await asyncio.wait([previous])
+        job = self.jobs.find(message.job_id)
+        if job is not None and job.state is not JobState.cancelled:
+            self.handle_message(message._replace(images=images, error=None))  # error: reported
+
+    @staticmethod
+    def _for_comfy(image: Image) -> tuple[Image, bool]:
+        """An input for ComfyUI, which reads a transparent pixel as the black stored under it:
+        on grey instead (transparent.py) -- and whether it had transparency to keep."""
+        if transparent.has_transparency(image):
+            return transparent.flatten(image), True
+        return image, False
 
     def _stagehand_cards(self, selection: Bounds | None):
         """The cards a generation is about: every card that's on, or with a selection those
@@ -383,8 +411,12 @@ class DocumentModel(QObject, ObservableProperties):
             conditioning, self.style, seed, arch, inpaint_instruction, ref_layers
         )
 
+        cutout = self.transparent
         if mask is not None or workflow_kind is WorkflowKind.refine:
             image = self._get_current_image(bounds) if not dryrun else DummyImage(bounds.extent)
+            if not dryrun:
+                image, had_alpha = self._for_comfy(image)
+                cutout = cutout or had_alpha
 
         if mask is not None:
             if workflow_kind is WorkflowKind.generate:
@@ -426,6 +458,7 @@ class DocumentModel(QObject, ObservableProperties):
         job_params.inpaint_mode = inpaint_mode
         job_params.ref_layers = ref_layers
         job_params.is_layered = arch is Arch.qwen_l
+        job_params.cutout = cutout
         job_params.metadata.update(prompt_meta)
         job_params.metadata["loras"] = [{"name": l.name, "weight": l.strength} for l in loras]
         job_params.metadata["strength"] = strength
@@ -482,6 +515,10 @@ class DocumentModel(QObject, ObservableProperties):
         client = self._connection.client
         extent = self._doc.extent
         image = self._doc.get_image(Bounds(0, 0, *extent)) if not dryrun else DummyImage(extent)
+        cutout = self.transparent
+        if not dryrun:
+            image, had_alpha = self._for_comfy(image)
+            cutout = cutout or had_alpha
         params = self.upscale.params
         params.upscale.model = params.upscale.model or client.models.default_upscaler
         if params.upscale.model not in client.models.upscalers:
@@ -527,6 +564,7 @@ class DocumentModel(QObject, ObservableProperties):
         target_bounds = Bounds(0, 0, *params.target_extent)
         name = f"{target_bounds.width}x{target_bounds.height}"
         job_params = JobParams(target_bounds, name, seed=params.seed, regions=job_regions)
+        job_params.cutout = cutout
         return input, job_params
 
     def upscale_image(self):
@@ -591,8 +629,10 @@ class DocumentModel(QObject, ObservableProperties):
         if mask is not None:
             workflow_kind = WorkflowKind.refine_region
             bounds, mask.bounds = compute_relative_bounds(mask.bounds, mask.bounds)
+        cutout = self.transparent
         if mask is not None or workflow_kind is WorkflowKind.refine:
-            image = self._get_current_image(bounds, exclude_internal=False)
+            image, had_alpha = self._for_comfy(self._get_current_image(bounds, exclude_internal=False))
+            cutout = cutout or had_alpha
 
         conditioning, job_regions = process_regions(regions, bounds)
         conditioning.language = self.prompt_translation_language
@@ -617,6 +657,7 @@ class DocumentModel(QObject, ObservableProperties):
             is_live=True,
         )
         params = JobParams(bounds, conditioning.positive, regions=job_regions)
+        params.cutout = cutout
         return input, params
 
     async def _generate_live(self, input: WorkflowInput, job_params: JobParams):
@@ -644,7 +685,10 @@ class DocumentModel(QObject, ObservableProperties):
                 mask, bounds = self.custom.prepare_mask(selection_node, mask, select_bounds, bounds)
 
             img_input = ImageInput.from_extent(bounds.extent)
-            img_input.initial_image = self._get_current_image(bounds, exclude_internal=not is_live)
+            # a custom workflow's outputs could be anything: on grey in, nothing cut out
+            img_input.initial_image, _ = self._for_comfy(
+                self._get_current_image(bounds, exclude_internal=not is_live)
+            )
             img_input.hires_mask = mask.to_image(bounds.extent) if mask else None
 
             params = self.custom.collect_parameters(
@@ -727,7 +771,7 @@ class DocumentModel(QObject, ObservableProperties):
             return
 
         try:
-            image = doc.get_image(Bounds(0, 0, *self._doc.extent))
+            image, _ = self._for_comfy(doc.get_image(Bounds(0, 0, *self._doc.extent)))
             mask, _ = doc.create_mask_from_selection(SelectionModifiers(pad_rel=0.25, multiple=64))
             bounds = mask.bounds if mask else None
             perf = self._performance_settings(self._connection.client)
@@ -793,6 +837,11 @@ class DocumentModel(QObject, ObservableProperties):
         elif message.event is ClientEvent.finished:
             if message.error:  # successful jobs may have encountered some warnings
                 self.report_error(Error.from_string(message.error, ErrorKind.warning))
+            if message.images and job.params.cutout:
+                job.params.cutout = False  # once: the cut images come back through here
+                cut = self._cut(message, self._last_cut)
+                self._last_cut = eventloop.run(_report_errors(self, cut))
+                return
             if message.images:
                 self.jobs.set_results(job, message.images)
             if job.kind is JobKind.control_layer:
@@ -1571,10 +1620,13 @@ class AnimationWorkspace(QObject, ObservableProperties):
         m = self._model
         requires_image = m.strength < 1.0 or m.is_editing
         bounds = Bounds(0, 0, *m.document.extent)
-        canvas = m._get_current_image(bounds) if requires_image else bounds.extent
+        canvas, had_alpha = bounds.extent, False
+        if requires_image:
+            canvas, had_alpha = m._for_comfy(m._get_current_image(bounds))
         seed = m.seed if m.fixed_seed else workflow.generate_seed()
         inputs = self._prepare_input(canvas, seed, m.document.current_time)
         params = JobParams(bounds, m.regions.positive, frame=(m.document.current_time, 0, 0))
+        params.cutout = m.transparent or had_alpha
         await m.enqueue_jobs(inputs, JobKind.animation_frame, params)
 
     def generate_batch(self):

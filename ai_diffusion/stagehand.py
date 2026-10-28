@@ -315,6 +315,7 @@ def payload(
     only_masked: bool = True,
     padding: int = 32,
     mask_blur: int = 4,
+    transparent: bool = False,
 ):
     """Forge img2img request: settings and characters from the PNG info, the rest from Krita.
     With a mask it's Forge's "Inpaint masked, original content", Only masked by default
@@ -360,8 +361,12 @@ def payload(
             inpainting_mask_invert=0,
             mask_blur=mask_blur,
         )
+    # always explicit: args sent win over a "Transparent background: True" in the infotext, so
+    # Krita's toggle decides (an input with transparency still turns it on, Stagehand-side)
+    scripts = {"Transparent": {"args": [bool(transparent)]}}
     if refs := reference_args(text):
-        request["alwayson_scripts"] = {"Precise Reference": {"args": refs}}
+        scripts["Precise Reference"] = {"args": refs}
+    request["alwayson_scripts"] = scripts
     return request
 
 
@@ -478,9 +483,14 @@ if __name__ == "__main__":
         8,
     )
     assert (
-        "alwayson_scripts" not in inpaint
-        and payload(pr, "i", None, 1, 7, 8, 8, "x")["alwayson_scripts"]
+        "Precise Reference" not in inpaint["alwayson_scripts"]
+        and payload(pr, "i", None, 1, 7, 8, 8, "x")["alwayson_scripts"]["Precise Reference"]
     )
+    assert payload(pr, "i", None, 1, 7, 8, 8, "x", transparent=True)["alwayson_scripts"]["Transparent"] == {
+        "args": [True]
+    }
+    off = payload(pr + ", Transparent background: True", "i", None, 1, 7, 8, 8, "x")
+    assert off["alwayson_scripts"]["Transparent"] == {"args": [False]}  # the toggle, not the paste
     # the fields Forge's img2img API doesn't take from infotext
     assert inpaint["prompt"].endswith("source#hug") and inpaint["negative_prompt"].endswith(
         "tan, dark skin"

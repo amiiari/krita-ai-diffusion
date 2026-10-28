@@ -190,6 +190,8 @@ class StagehandWidget(QWidget):
         if key == "show_negative_prompt":  # also when changed in AI Diffusion's settings
             with theme.SignalBlocker(self._negative):
                 self._negative.setChecked(bool(value))
+            if self._model and self._model.stagehand is not None:  # the main negative with it
+                self.main_prompt_hidden.emit(settings.stagehand_hide_main_prompt)
             # the characters' Undesired Content with it (those that have any)
             for button, card in self._uc_buttons:
                 button.setChecked(bool(value) and bool(card.uc.strip()))
