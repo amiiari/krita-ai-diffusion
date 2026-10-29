@@ -10,7 +10,6 @@ the cut only takes away from it.
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QImage, QPainter
 
 from .backend.network import RequestManager
@@ -38,16 +37,13 @@ def flatten(image: Image) -> Image:
     return out
 
 
-def take_alpha(image: Image, alpha: Image) -> Image:
-    """`image` with its alpha multiplied by `alpha` (greyscale, same size)."""
-    cut = QImage(image.width, image.height, QImage.Format.Format_ARGB32)
-    cut.fill(Qt.GlobalColor.white)
-    cut.setAlphaChannel(alpha._qimage.convertToFormat(QImage.Format.Format_Grayscale8))
-    out = Image.copy(image)
+def within(cut: Image, result: Image) -> Image:
+    """`cut` (the cutout, RGBA) inside `result`'s own alpha: Krita's mask for the result."""
+    out = Image.copy(cut)
     out.to_krita_format()
     painter = QPainter(out._qimage)
     painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-    painter.drawImage(0, 0, cut)
+    painter.drawImage(0, 0, result._qimage)
     painter.end()
     return out
 
@@ -57,5 +53,5 @@ async def cut(forge: str, images: ImageCollection) -> ImageCollection:
     out = []
     for image in images:
         r = await net.post(f"{forge.rstrip('/')}/stagehand/v1/matte", {"image": image.to_base64()})
-        out.append(take_alpha(image, Image.from_base64(r["alpha"])))
+        out.append(within(Image.from_base64(r["image"]), image))  # edge colours cleaned too
     return ImageCollection(out)
